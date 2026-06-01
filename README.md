@@ -29,89 +29,50 @@ docloom은 **"미리보기 + 왕복 채널"만** 책임진다. HTML을 어떻게
 | **pdf** | O 위치보존 | X (고정 레이아웃) |
 | **md · html · txt** | O | O |
 
-## 빠른 시작
+## 설치
 
 ```bash
-npm install
-npm run build
-npm test
+npm install && npm run build
 ```
 
-**미리보기** — 포맷은 자동 판별된다:
+## 사용법 (Node / TypeScript)
 
 ```ts
-import { previewHtml } from "docloom";
-import { readFileSync, writeFileSync } from "node:fs";
+import { previewHtml, encode, decode } from "docloom";
 
-const bytes = new Uint8Array(readFileSync("sample.hwpx")); // docx/pdf/ppt… 무엇이든
-writeFileSync("preview.html", previewHtml(bytes, { title: "미리보기" }));
+previewHtml(bytes);                        // 어떤 포맷이든 → 미리보기 HTML
+const { html, manifest } = encode(bytes);  // 편집용 HTML + 복원 키트
+decode(editedHtml, manifest);              // 편집한 HTML → 양식 보존한 원본 포맷
 ```
 
-**편집 + 왕복**:
+> `previewHtml()`은 보기 전용, `encode().html`은 편집/왕복용(`manifest`와 짝).
 
-```ts
-import { encode, decode } from "docloom";
+## Python 에서 쓰기
 
-const { html, manifest } = encode(bytes);   // 편집용 HTML + 복원 키트
-//  ... html 을 편집 ...
-const restored = decode(editedHtml, manifest); // 원본 양식 보존한 새 문서
-```
-
-> 두 HTML을 구분하세요.
-> `previewHtml()`은 보기 전용(왕복 불가), `encode().html`은 편집/왕복용 본문 조각(`manifest`와 짝).
-
-## 데모
+HTTP 서버로 띄워 호출한다.
 
 ```bash
-npm run demo:build    # demo/docloom.mjs 번들 생성
-npx serve demo        # 또는 demo/index.html 직접 열기
+npm run serve     # http://localhost:8080
 ```
 
-파일을 드래그하면 포맷을 자동 판별해 미리보기한다.
-
-## 다른 언어에서 쓰기 (HTTP API)
-
-docloom은 Node/TS 라이브러리다. Python·Go·Java·C++ 등에서는 **작은 HTTP 서버로 띄워** 호출한다.
-저장소에 의존성 없는 서버(`server.mjs`)가 들어 있다:
-
-```bash
-npm run build
-npm run serve         # http://localhost:8080
-```
-
-| 엔드포인트 | 입력 | 출력 |
-|---|---|---|
-| `POST /preview` | 문서 바이트 | 미리보기 HTML |
-| `POST /encode` | 문서 바이트 | `{ html, manifest }` (JSON) |
-| `POST /decode` | `/encode` 응답 JSON | 양식 보존한 문서 바이트 |
-
-> 왕복은 `/encode` 응답 JSON을 그대로 `/decode`에 돌려보내면 된다(`manifest` 내부 바이너리는 서버가 알아서 처리).
-
-**Python**
 ```python
 import requests
+
+# 미리보기
 html = requests.post("http://localhost:8080/preview",
                      data=open("a.hwpx", "rb").read()).text
-open("preview.html", "w").write(html)
+
+# 편집 + 왕복
+kit = requests.post("http://localhost:8080/encode",
+                    data=open("a.docx", "rb").read()).json()
+kit["html"] = kit["html"].replace("기존 문구", "새 문구")   # html 만 편집
+restored = requests.post("http://localhost:8080/decode", json=kit).content  # 양식 보존
 ```
 
-**Go**
-```go
-b, _ := os.ReadFile("a.docx")
-resp, _ := http.Post("http://localhost:8080/preview", "application/octet-stream", bytes.NewReader(b))
-html, _ := io.ReadAll(resp.Body)
-```
+## 데모 (브라우저)
 
-**Java**
-```java
-var req = HttpRequest.newBuilder(URI.create("http://localhost:8080/preview"))
-    .POST(HttpRequest.BodyPublishers.ofFile(Path.of("a.pdf"))).build();
-String html = HttpClient.newHttpClient().send(req, BodyHandlers.ofString()).body();
-```
-
-**C++ / 그 외** — `curl`로 동일하게:
 ```bash
-curl --data-binary @a.docx http://localhost:8080/preview -o preview.html
+npm run demo:build && npx serve demo    # 파일을 드래그하면 미리보기
 ```
 
 ## 어떻게 양식을 보존하나
