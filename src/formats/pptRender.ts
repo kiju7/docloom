@@ -127,8 +127,64 @@ function blipDataUri(pics: Uint8Array, foDelay: number): string | undefined {
 
 // ── 텍스트 ──────────────────────────────────────────────────────────────────────
 function esc(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
-/** ClientTextbox(0xF00D) → 문단 HTML(글자크기/색은 StyleTextProp best-effort). */
-function readText(dv: DataView, buf: Uint8Array, tb: Rec): { html: string; txType: number; base: number } | undefined {
+/** TextCFException 문자런 마스크의 가변필드 바이트 advance(글자크기·색 추출). */
+/** StyleTextPropAtom(0x0FA1) → 문자별 {글자크기pt, 색}. 스펙(POI 필드테이블)대로 파싱. */
+function readRunProps(dv: DataView, tb: Rec, nChars: number, scheme: string[]): { sizes: number[]; colors: (string | undefined)[] } {
+  const sizes: number[] = [], colors: (string | undefined)[] = [];
+  const sp = findRec(dv, tb.bs, tb.be, 0x0fa1);
+  if (!sp) return { sizes, colors };
+  try {
+    let p = sp.bs; const end = sp.be;
+    // 문단런(TextPFRun): count(4)+indent(2)+mask(4)+PF가변필드. Σcount≈nChars(+1) 까지 스킵.
+    let acc = 0, guard = 0;
+    while (p + 10 <= end && acc < nChars && guard++ < 20000) {
+      const count = dv.getUint32(p, true); p += 4; p += 2; // indent
+      const mask = dv.getUint32(p, true); p += 4;
+      let n = 0;
+      if (mask & 0x0000000f) n += 2; // paragraph flags
+      if (mask & 0x00000080) n += 2; // bullet.char
+      if (mask & 0x00000010) n += 2; // bullet.font
+      if (mask & 0x00000040) n += 2; // bullet.size
+      if (mask & 0x00000020) n += 4; // bullet.color
+      if (mask & 0x00000800) n += 2; // alignment
+      if (mask & 0x00001000) n += 2; // linespacing
+      if (mask & 0x00002000) n += 2; // spacebefore
+      if (mask & 0x00004000) n += 2; // spaceafter
+      if (mask & 0x00000100) n += 2; // text.offset(leftmargin)
+      if (mask & 0x00000400) n += 2; // bullet.offset(indent)
+      if (mask & 0x00008000) n += 2; // defaultTabSize
+      if (mask & 0x00100000) { const tc = dv.getUint16(p + n, true); n += 2 + tc * 4; } // tabStops
+      if (mask & 0x00010000) n += 2; // fontAlign
+      if (mask & 0x000e0000) n += 2; // wrapFlags
+      if (mask & 0x00200000) n += 2; // textDirection
+      p += n; acc += count;
+      if (count <= 0) break;
+    }
+    // 문자런(TextCFRun): count(4)+mask(4)+CF가변필드.
+    acc = 0; guard = 0;
+    while (p + 8 <= end && acc < nChars && guard++ < 20000) {
+      const count = dv.getUint32(p, true); p += 4;
+      const mask = dv.getUint32(p, true); p += 4;
+      if (mask & 0x0000ffff) p += 2; // char flags(bold/italic…)
+      if (mask & 0x00010000) p += 2; // font.index
+      if (mask & 0x00100000) p += 2; // asian font
+      if (mask & 0x00200000) p += 2; // ansi font
+      if (mask & 0x00400000) p += 2; // symbol font
+      let size: number | undefined, color: string | undefined;
+      if (mask & 0x00020000) { size = dv.getUint16(p, true); p += 2; }       // font.size(pt)
+      if (mask & 0x00040000) { color = colorRef(dv.getUint32(p, true), scheme); p += 4; } // color
+      if (mask & 0x00080000) p += 2; // superscript
+      const sane = size != null && size >= 4 && size <= 200 ? size : undefined;
+      for (let k = 0; k < count && acc + k < nChars; k++) { if (sane) sizes[acc + k] = sane; if (color) colors[acc + k] = color; }
+      acc += count;
+      if (count <= 0) break;
+    }
+  } catch { return { sizes: [], colors: [] }; }
+  return { sizes, colors };
+}
+
+/** ClientTextbox(0xF00D) → 문단 HTML(글자크기·색 StyleTextProp 반영). */
+function readText(dv: DataView, buf: Uint8Array, tb: Rec, scheme: string[]): { html: string; txType: number; base: number } | undefined {
   let raw: string | undefined;
   let txType = -1;
   const th = findRec(dv, tb.bs, tb.be, 0x0f9f); // TextHeaderAtom
@@ -140,16 +196,19 @@ function readText(dv: DataView, buf: Uint8Array, tb: Rec): { html: string; txTyp
     if (tbs) { let s = ""; for (let q = tbs.bs; q < tbs.be; q++) s += String.fromCharCode(buf[q]!); raw = s; }
   }
   if (raw == null) return undefined;
-  // 글자크기: StyleTextProp 의 문단/문자 예외 필드테이블이 복잡해 신뢰 불가(어긋나면 깨짐).
-  // txType(자리표시자 종류)별 기본 크기로 안정 렌더. (서식 정밀도는 범위 밖)
-  const base = txType === 0 || txType === 6 ? 30 : txType === 2 ? 13 : 17; // 제목/노트/본문
+  raw = raw.replace(/\x00/g, "");
+  const { sizes, colors } = readRunProps(dv, tb, raw.length, scheme);
+  const base = txType === 0 || txType === 6 ? 28 : txType === 2 ? 12 : 16; // 파싱 실패시 txType 폴백
   // 0x0D=문단끝, 0x0B=줄바꿈.
-  const paras = raw.replace(/\x00/g, "").split("\r");
-  let html = "";
-  for (const para of paras) {
+  let html = "", ci = 0;
+  for (const para of raw.split("\r")) {
     const txt = para.replace(/\x0b/g, "\n");
     const lines = esc(txt).split("\n").join("<br/>");
-    html += txt.trim() ? `<p>${lines}</p>` : `<p>&#8203;</p>`;
+    const size = sizes[ci] || base;
+    const color = colors[ci];
+    const st = `font-size:${size}pt` + (color ? `;color:${color}` : "");
+    html += `<p style="${st}">${txt.trim() ? lines : "&#8203;"}</p>`;
+    ci += para.length + 1; // +1 = \r
   }
   return { html, txType, base };
 }
@@ -208,14 +267,14 @@ function renderSp(dv: DataView, buf: Buf, sp: Rec, xf: XF, ctx: Ctx): string {
 
   // 텍스트.
   const tb = kids.find((k) => k.type === 0xf00d);
-  const txt = tb ? readText(dv, buf, tb) : undefined;
+  const txt = tb ? readText(dv, buf, tb, ctx.scheme) : undefined;
   const hasFill = d.length > 1;
   if (!txt && !hasFill) return "";
-  d.push("display:flex", "flex-direction:column", "justify-content:center", "overflow:hidden");
-  if (txt) {
-    d.push(`font-size:${txt.base}pt`);
-    if (txt.txType === 5 || txt.txType === 6) d.push("text-align:center"); // 가운데 제목/본문
-  }
+  // 세로 앵커: anchorText(0/3=top,1/4=middle,2/5=bottom). 기본 top.
+  const an = opt.anchor ?? 0;
+  const justify = an === 1 || an === 4 ? "center" : an === 2 || an === 5 ? "flex-end" : "flex-start";
+  d.push("display:flex", "flex-direction:column", `justify-content:${justify}`, "overflow:hidden");
+  if (txt && (txt.txType === 5 || txt.txType === 6 || an >= 3)) d.push("text-align:center"); // 가운데 타입
   return `<div class="ppt-sp" style="${d.join(";")}">${txt?.html ?? ""}</div>`;
 }
 
