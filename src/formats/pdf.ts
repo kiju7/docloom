@@ -151,9 +151,13 @@ function renderGlyph(it: PageText["items"][number], x0: number, y0: number, hPt:
   const w = it.bold ? "font-weight:700;" : "";
   const st = it.italic ? "font-style:italic;" : "";
   const editAttr = ed ? ` contenteditable="true" data-pi="${ed.pi}" data-ii="${ed.ii}"` : "";
+  // 원본 런 폭(px) — 대체폰트가 더 넓게 그려지면 스크립트가 이 폭으로 scaleX 압축(잘림/겹침 방지).
+  const wAttr = it.w && it.w > 0 ? ` data-w="${(it.w * PT2PX).toFixed(1)}"` : "";
+  // 임베디드 폰트가 있으면 그 family 를 앞세우고, 없는 글리프는 대체 스택으로 폴백.
+  const ff = it.ff ? `font-family:'${it.ff}',-apple-system,"Malgun Gothic",serif;` : "";
   return (
-    `<span class="pdf-t${ed ? " pdf-edit" : ""}"${editAttr} style="left:${left.toFixed(2)}px;top:${top.toFixed(2)}px;` +
-    `font-size:${sizePx.toFixed(2)}px;${w}${st}">${esc(it.text)}</span>`
+    `<span class="pdf-t${ed ? " pdf-edit" : ""}"${editAttr}${wAttr} style="left:${left.toFixed(2)}px;top:${top.toFixed(2)}px;` +
+    `font-size:${sizePx.toFixed(2)}px;${ff}${w}${st}">${esc(it.text)}</span>`
   );
 }
 
@@ -211,33 +215,56 @@ function renderPage(
     ? `<div class="pdf-empty">표시할 내용이 없습니다(미지원 이미지 포맷일 수 있음).</div>`
     : "";
 
-  const rot = pt.rotate ? ` style="--pw:${wPx}px;--ph:${hPx}px;transform:rotate(${pt.rotate}deg)"` :
-    ` style="--pw:${wPx}px;--ph:${hPx}px"`;
-  return `<section class="pdf-page"${rot} data-page="${index + 1}">${out}${empty}</section>`;
+  // rotate 는 인라인 기본값(스크립트 미동작 시에도 유지), data-rot 로 스크립트가 scale 과 합성.
+  const rotAttr = pt.rotate ? ` data-rot="${pt.rotate}"` : "";
+  const tf = pt.rotate ? `;transform:rotate(${pt.rotate}deg)` : "";
+  // .pdf-fit 래퍼: fit-to-width 스크립트가 축소 시 래퍼 높이를 줄여 페이지가 빈틈없이 쌓이게 한다.
+  // 스크립트가 없으면 래퍼는 원본 크기 그대로(폴백).
+  return `<div class="pdf-fit"><section class="pdf-page"${rotAttr} style="--pw:${wPx}px;--ph:${hPx}px${tf}" data-page="${index + 1}">${out}${empty}</section></div>`;
 }
 
-/** 미리보기 기본 페이지 상한 — 수백 페이지 PDF 가 브라우저를 멈추지 않게(글자당 1 span). */
-const DEFAULT_MAX_PAGES = 60;
+/**
+ * 미리보기 기본 페이지 상한. 벡터로 글자를 그린 PDF 는 페이지당 경로가 수천 개라 한 페이지가
+ * 수백 KB HTML 이 된다 → 한 번에 적게 그리고 "더보기"(extendPdfModel)로 이어 보게 한다.
+ */
+const DEFAULT_MAX_PAGES = 20;
+
+/** 한 페이지 → PageText. 추출 실패해도 기하만 채운 빈 페이지를 돌려 렌더가 안 끊기게. */
+function extractOnePage(doc: PdfDocument, page: PDict): PageText {
+  const g = pageGeom(doc, page);
+  const resources = doc.getDict(doc.get(page, "Resources"));
+  try {
+    return extractPageText(doc, pageContent(doc, page), resources, { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0 });
+  } catch {
+    return { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0, items: [], images: [], paths: [] };
+  }
+}
 
 export function pdfToPreviewHtml(bytes: Uint8Array, opts: PreviewOptions = {}): string {
   const doc = new PdfDocument(bytes);
   const allPages = doc.getPages();
   const maxPages = Math.max(1, opts.maxPages ?? DEFAULT_MAX_PAGES);
-  const pages: PageText[] = allPages.slice(0, maxPages).map((page) => {
-    const g = pageGeom(doc, page);
-    const resources = doc.getDict(doc.get(page, "Resources"));
-    try {
-      return extractPageText(doc, pageContent(doc, page), resources, { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0 });
-    } catch {
-      return { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0, items: [], images: [], paths: [] };
-    }
-  });
+  const pages: PageText[] = allPages.slice(0, maxPages).map((page) => extractOnePage(doc, page));
   return composePdfHtml(doc, pages, allPages.length, opts, !!(opts as { editable?: boolean }).editable);
 }
 
 /** 미리보기 편집용: 이미 추출한 모델을 렌더(editable 기본 true). 데모 편집 흐름에서 모델 공유. */
 export function pdfModelToPreviewHtml(model: PdfEditModel, opts: PreviewOptions & { editable?: boolean } = {}): string {
   return composePdfHtml(model.doc, model.pages, model.pages.length, opts, opts.editable !== false);
+}
+
+/**
+ * 모델의 [fromPage, toPage) 페이지만 `<section>` 조각 HTML 로 렌더(완결 문서 아님).
+ * "더보기"가 기존 미리보기 DOM 끝에 그대로 이어 붙이는 용도 — data-pi 는 절대 페이지번호.
+ */
+export function pdfModelPagesHtml(model: PdfEditModel, fromPage: number, toPage: number, opts: { editable?: boolean } = {}): string {
+  const editable = opts.editable !== false;
+  const imgCache = new Map<PStream, PdfImage | null>();
+  const from = Math.max(0, fromPage);
+  const to = Math.min(model.pages.length, toPage);
+  let out = "";
+  for (let i = from; i < to; i++) out += renderPage(model.doc, model.pages[i]!, i, imgCache, editable) + "\n";
+  return out;
 }
 
 /** doc + 추출된 pages → 완결 미리보기 HTML (pdfToPreviewHtml / 모델 렌더 공용). */
@@ -262,10 +289,12 @@ function composePdfHtml(doc: PdfDocument, pages: PageText[], totalPages: number,
 
   const css = `
   body { background:#eceef0; padding:28px 0; }
+  /* fit-to-width 래퍼: 가운데 정렬 + 창보다 넓으면 넘치지 않게. 스크립트가 축소 시 폭/높이를 직접 지정. */
+  .pdf-fit { width: fit-content; max-width: 100%; margin: 0 auto 22px; }
   .pdf-page {
     position: relative; box-sizing: border-box;
     width: var(--pw); height: var(--ph);
-    margin: 0 auto 22px; background:#fff;
+    background:#fff;
     box-shadow: 0 1px 4px rgba(0,0,0,.12), 0 8px 24px rgba(0,0,0,.10);
     overflow: hidden;
   }
@@ -294,11 +323,61 @@ function composePdfHtml(doc: PdfDocument, pages: PageText[], totalPages: number,
   .pdf-edit:hover { background: rgba(91,108,255,.12); }
   .pdf-edit:focus { background: rgba(91,108,255,.22); box-shadow: 0 0 0 1px rgba(91,108,255,.5); }
   `;
-  return toPreviewHtml(`<div class="pdf-wrap">${encBanner}${truncBanner}${note}${body}</div>`, {
+  // 임베디드 폰트 @font-face(파일 안 폰트 바이트를 data URI 로 인라인 → 폐쇄망 자기완결).
+  const faces = [...doc.fontFaces.values()].join("\n");
+  return toPreviewHtml(`<div class="pdf-wrap">${encBanner}${truncBanner}${note}${body}</div>${PDF_FIT_SCRIPT}`, {
     ...opts,
-    css: (opts.css ? opts.css : "") + css,
+    css: (opts.css ? opts.css : "") + faces + css,
   });
 }
+
+/** 모델이 지금까지 추출한 페이지들이 쓰는 임베디드 폰트 @font-face CSS 전체("더보기" 시 주입용). */
+export function pdfModelFontFaceCss(model: PdfEditModel): string {
+  return [...model.doc.fontFaces.values()].join("\n");
+}
+
+/**
+ * fit-to-width: A4 페이지(고정 px)가 창보다 넓으면 transform:scale 로 줄여 가로 스크롤/잘림을 막는다.
+ * 원본보다 키우진 않는다(scale ≤ 1). resize 마다 재계산하고, "더보기"로 페이지를 이어 붙인 뒤
+ * window.__pdfFit() 으로 다시 부를 수 있다. 회전 페이지는 기존 동작 유지(축소 미적용).
+ * 스크립트가 안 돌아도(차단 등) 래퍼가 원본 크기로 폴백 — 깨지지 않고 그냥 100% 로 보인다.
+ */
+const PDF_FIT_SCRIPT = `<script>
+(function(){
+  // 대체폰트가 원본보다 넓게 그려진 줄을 원본 폭(data-w)으로 scaleX 압축 → 페이지 밖 잘림 방지.
+  function squeeze(root){
+    var ts=(root||document).querySelectorAll('.pdf-t[data-w]');
+    for(var i=0;i<ts.length;i++){
+      var el=ts[i], target=parseFloat(el.getAttribute('data-w')); if(!(target>0)) continue;
+      el.style.transform='none';            // 먼저 초기화하고 자연폭 측정(재호출에도 안정적)
+      var natural=el.scrollWidth;
+      el.style.transform = natural>target+0.5 ? 'scaleX('+(target/natural)+')' : '';
+    }
+  }
+  function fit(root){
+    var fits=(root||document).querySelectorAll('.pdf-fit');
+    for(var i=0;i<fits.length;i++){
+      var fit=fits[i], pg=fit.querySelector('.pdf-page'); if(!pg) continue;
+      if(pg.getAttribute('data-rot')) continue; // 회전 페이지는 그대로
+      var pw=parseFloat(pg.style.getPropertyValue('--pw'))||pg.offsetWidth;
+      var ph=parseFloat(pg.style.getPropertyValue('--ph'))||pg.offsetHeight;
+      var avail=((fit.parentElement&&fit.parentElement.clientWidth)||window.innerWidth)-2;
+      var s=Math.min(1, avail/pw);
+      pg.style.transformOrigin='top left';
+      pg.style.transform = s<1 ? 'scale('+s+')' : '';
+      fit.style.width=(pw*s)+'px';
+      fit.style.height=(ph*s)+'px';
+    }
+    squeeze(root); // 줄 압축은 페이지 스케일과 무관(폰트 폭 기준) — 한 번 더 안정화
+  }
+  window.__pdfFit=fit;
+  window.addEventListener('resize', function(){ fit(); });
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', function(){ fit(); });
+  else fit();
+  // 웹폰트 로드 후 글자폭이 바뀔 수 있으니 폰트 준비되면 한 번 더.
+  if(document.fonts&&document.fonts.ready) document.fonts.ready.then(function(){ fit(); });
+})();
+</script>`;
 
 /** 추출된 편집 모델 — 페이지별 글자/이미지/경로 + 이미지 임베딩용 doc. */
 export interface PdfEditModel {
@@ -314,16 +393,27 @@ export function extractPdfModel(bytes: Uint8Array, opts: { maxPages?: number } =
   const doc = new PdfDocument(bytes);
   const all = doc.getPages();
   const limit = opts.maxPages && opts.maxPages > 0 ? Math.min(all.length, opts.maxPages) : all.length;
-  const pages: PageText[] = all.slice(0, limit).map((page) => {
-    const g = pageGeom(doc, page);
-    const resources = doc.getDict(doc.get(page, "Resources"));
-    try {
-      return extractPageText(doc, pageContent(doc, page), resources, { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0 });
-    } catch {
-      return { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0, items: [], images: [], paths: [] };
-    }
-  });
+  const pages: PageText[] = all.slice(0, limit).map((page) => extractOnePage(doc, page));
   return { doc, pages };
+}
+
+/** 모델의 전체(추출 가능) 페이지 수 — "더보기" 가 남은 페이지가 있는지 판단할 때. */
+export function pdfModelTotalPages(model: PdfEditModel): number {
+  return model.doc.getPages().length;
+}
+
+/**
+ * "더보기": 이미 추출한 모델 뒤에 다음 `count` 페이지를 추가 추출해 append.
+ * 앞 페이지는 다시 파싱하지 않으므로 기존 미리보기/편집을 보존한 채 이어 그릴 수 있다.
+ * 반환: 실제로 추가된 페이지 수(남은 게 없으면 0).
+ */
+export function extendPdfModel(model: PdfEditModel, count: number): number {
+  if (count <= 0) return 0;
+  const all = model.doc.getPages();
+  const from = model.pages.length;
+  const to = Math.min(all.length, from + count);
+  for (let i = from; i < to; i++) model.pages.push(extractOnePage(model.doc, all[i]!));
+  return to - from;
 }
 
 /** 편집 모델 → 새 PDF 바이트(텍스트는 비임베딩 Helvetica/CID, 이미지·벡터 재방출). */

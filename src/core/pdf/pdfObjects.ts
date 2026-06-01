@@ -294,6 +294,11 @@ export class PdfDocument {
   /** AES 등 미지원 암호로 암호화됨 → 텍스트가 안 나옴(호출측 안내용). */
   encryptedUnsupported = false;
 
+  /** 임베디드 폰트 @font-face CSS: family → 규칙. 미리보기 <style> 로 주입(폐쇄망 자기완결). */
+  readonly fontFaces = new Map<string, string>();
+  /** FontFile 스트림 → 생성한 family(또는 null=임베드 불가). 폰트당 1회만 변환. */
+  readonly fontEmbedCache = new Map<PStream, string | null>();
+
   constructor(public buf: Uint8Array) {
     this.scanObjects();
     this.findTrailer();

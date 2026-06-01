@@ -116,7 +116,7 @@ describe("xlsx 미리보기", () => {
     expect(html).toMatch(/style="[^"]*font-family:'[^']*'[^"]*background-color:#FFFF00[^"]*"/);
   });
 
-  it("시트에 앵커된 이미지를 미리보기에 표시한다", () => {
+  it("시트에 앵커된 이미지를 원문처럼 해당 셀 위에 겹쳐 표시한다", () => {
     const png = new Uint8Array(
       Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"),
     );
@@ -128,12 +128,14 @@ describe("xlsx 미리보기", () => {
     };
     const sheet = `<worksheet xmlns="x"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>`;
     const html = previewHtml(xlsx(sheet, ["x"], undefined, extra));
-    expect(html).toContain("xlsx-images");
+    // 별도 갤러리(xlsx-images)가 아니라 셀 td 안에 절대배치 img 로 겹쳐 그린다.
+    expect(html).not.toContain("xlsx-images");
+    expect(html).toContain('class="xlsx-imgcell"'); // 앵커 셀(B3)에 클래스
+    expect(html).toContain("xlsx-cell-img");
     expect(html).toContain("data:image/png;base64,");
-    expect(html).toContain("B3"); // col1,row2 → B3 위치 캡션
   });
 
-  it("표시 못 하는 형식(EMF/WMF)은 자리표시자로 알려준다", () => {
+  it("표시 못 하는 형식(EMF/WMF)은 셀 위 자리표시자로 알려준다", () => {
     const extra: Record<string, Uint8Array> = {
       "xl/worksheets/_rels/sheet1.xml.rels": strToU8(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>`),
       "xl/drawings/drawing1.xml": strToU8(`<xdr:wsDr xmlns:xdr="d" xmlns:a="a" xmlns:r="r"><xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic></xdr:oneCellAnchor></xdr:wsDr>`),
@@ -142,8 +144,8 @@ describe("xlsx 미리보기", () => {
     };
     const sheet = `<worksheet xmlns="x"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>`;
     const html = previewHtml(xlsx(sheet, ["x"], undefined, extra));
-    expect(html).toContain("브라우저 미표시");
-    expect(html).toContain("EMF 형식");
+    expect(html).toContain("xlsx-img-ph"); // 셀 위 자리표시자
+    expect(html).toContain("EMF");
   });
 
   it("가로 스크롤 컨테이너로 감싸 레이아웃이 무너지지 않는다", () => {

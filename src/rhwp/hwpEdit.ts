@@ -18,6 +18,7 @@
  */
 import { parse, type HTMLElement } from "node-html-parser";
 import { bytesToBase64 } from "../core/base64.js";
+import { extractHwpBinImages } from "../preview/hwpRender.js";
 
 /** rhwp `HwpDocument` 에서 이 모듈이 쓰는 메서드만 추린 구조적 타입. */
 export interface RhwpDoc {
@@ -53,11 +54,17 @@ export interface RhwpDoc {
   getControlImageData?(section: number, para: number, control: number): Uint8Array;
   getPictureProperties?(section: number, para: number, control: number): string;
   getPageOfPosition?(section: number, para: number): string;
+  /** 페이지에 앵커된 floating 그림. 현 WASM 빌드는 imageCount 만 채우고 항목은 비울 수 있음. */
+  getPageOverlayImages?(page: number): string;
+  /** 페이지 위 컨트롤(표·그림 등)의 레이아웃 좌표/크기(px). 그림은 type:"image" + x/y/w/h. */
+  getPageControlLayout?(page: number): string;
   getHeaderFooter?(section: number, isHeader: boolean, applyTo: number): string;
   getParaPropertiesInHf?(section: number, isHeader: boolean, applyTo: number, hfParaIdx: number): string;
   // 하이브리드 미리보기(hwpToHybridPreviewHtml)용 — rhwp 의 SVG 렌더.
   pageCount?(): number;
   renderPageSvg?(page: number): string;
+  // 충실 미리보기(hwpToFaithfulPreviewHtml)용 — rhwp 의 HTML 렌더(이미지·표·텍스트 절대배치, 자립형).
+  renderPageHtml?(page: number): string;
 }
 
 const esc = (s: string): string =>
@@ -398,12 +405,38 @@ function renderImage(doc: RhwpDoc, s: number, p: number, ci: number): string | n
 }
 
 /**
+ * getPageOverlayImages 의 behind/front 항목(쪽배경·도형그림 등 floating)을 절대배치 <img> 로.
+ * bbox 는 페이지 좌상단 기준 CSS px. z 는 본문(z-index:1) 대비 뒤(0)/앞(2).
+ */
+function overlayImg(e: any, z: number): string {
+  if (!e || typeof e.mime !== "string" || typeof e.base64 !== "string" || !e.base64) return "";
+  const b = e.bbox ?? {};
+  const num = (v: any, css: string) => (typeof v === "number" && isFinite(v) ? `${css}:${v}px;` : "");
+  const pos = num(b.x, "left") + num(b.y, "top") + num(b.width, "width") + num(b.height, "height");
+  return `<img class="hp-overlay" alt="" style="${pos}z-index:${z}" src="data:${e.mime};base64,${e.base64}">`;
+}
+
+/**
+ * getPageControlLayout 의 그림 컨트롤(type:"image", x/y/w/h px)을 절대배치 <img> 로.
+ * 바이트는 BinData 풀에서 받은 data URI(uri). 글 앞 레이어(z-index:2)에 둔다.
+ */
+function layoutImg(im: any, uri: string): string {
+  if (!uri) return "";
+  const num = (v: any, css: string) => (typeof v === "number" && isFinite(v) ? `${css}:${v}px;` : "");
+  const pos = num(im.x, "left") + num(im.y, "top") + num(im.w, "width") + num(im.h, "height");
+  return `<img class="hp-overlay" alt="" style="${pos}z-index:2" src="${uri}">`;
+}
+
+/**
  * rhwp 문서 → 리치 미리보기 HTML(선택·드래그·편집 가능한 진짜 HTML).
  * 평문문단·표(병합셀 그리드+셀 배경/정렬/글자)·이미지(실제크기)를 렌더하고, **rhwp 의 실제
  * 페이지번호(getPageOfPosition)로 종이 페이지를 나눠** 쌓는다. 절대좌표 픽셀일치는 아니지만
  * 표 구조·이미지 크기·페이지 구분이 맞고, 텍스트를 드래그/선택/편집할 수 있다.
  */
-export function hwpToRichPreviewHtml(doc: RhwpDoc, opts: { title?: string } = {}): string {
+export function hwpToRichPreviewHtml(
+  doc: RhwpDoc,
+  opts: { title?: string; rawBytes?: Uint8Array } = {},
+): string {
   const secN = sectionCount(doc);
   const pageDef = doc.getPageDef ? pj<any>(safe(() => doc.getPageDef!(0))) : null;
   const pageW = pageDef && pageDef.width ? hu2px(pageDef.width) : 794;
@@ -430,6 +463,8 @@ export function hwpToRichPreviewHtml(doc: RhwpDoc, opts: { title?: string } = {}
   // 페이지번호별 본문 누적(rhwp 가 계산한 실제 페이지 분할 사용).
   const pageBodies = new Map<number, string>();
   const add = (pg: number, html: string) => pageBodies.set(pg, (pageBodies.get(pg) ?? "") + html);
+  // 인라인으로 이미 렌더한 그림의 data URI(= 같은 BinData 바이트) — floating 보강 시 중복 제거용.
+  const renderedImgUris = new Set<string>();
 
   for (let s = 0; s < secN; s++) {
     const pc = safe(() => doc.getParagraphCount(s)) ?? 0;
@@ -443,7 +478,11 @@ export function hwpToRichPreviewHtml(doc: RhwpDoc, opts: { title?: string } = {}
       for (let ci = 0; ci < ctrls.length; ci++) {
         if (tableCis.has(ci)) continue;
         const img = renderImage(doc, s, p, ci);
-        if (img) add(pg, `<div class="hp-img">${img}</div>\n`);
+        if (img) {
+          const m = img.match(/src="([^"]+)"/);
+          if (m) renderedImgUris.add(m[1]!);
+          add(pg, `<div class="hp-img">${img}</div>\n`);
+        }
       }
 
       // 평문 문단(빈 문단도 렌더 → 세로 간격 보존. 컨트롤 문단은 제외).
@@ -459,10 +498,50 @@ export function hwpToRichPreviewHtml(doc: RhwpDoc, opts: { title?: string } = {}
     }
   }
 
+  // ── floating 그림(쪽배경·도형 등) → 해당 페이지 본문 흐름에 "표시크기"로 인라인 배치 ──────
+  // 흐름배치 미리보기라 절대좌표는 쓰지 않는다(절대배치는 본문과 어긋나 떠 보이고 빈 페이지를
+  // 만든다). 크기 출처: (a) getPageOverlayImages 의 behind/front 항목 bbox, (b) 항목이 비면
+  // getPageControlLayout 의 image(w/h). 바이트: (a)는 항목 base64, (b)는 BinData 풀(문서순).
+  // (인라인으로 이미 그린 그림은 같은 data URI 로 제외해 중복을 막는다.)
+  if (doc.getPageOverlayImages) {
+    const pool = opts.rawBytes
+      ? extractHwpBinImages(opts.rawBytes).filter((u) => !renderedImgUris.has(u))
+      : [];
+    let pi = 0;
+    const dim = (w?: number, h?: number) =>
+      (typeof w === "number" && w > 0 ? `width:${Math.round(w)}px;` : "") +
+      (typeof h === "number" && h > 0 ? `height:${Math.round(h)}px;` : "");
+    const flowImg = (pg: number, uri: string, w?: number, h?: number) =>
+      uri && add(pg, `<div class="hp-img"><img alt="" style="${dim(w, h)}max-width:100%" src="${uri}"></div>\n`);
+    // 페이지 번호는 getPageOfPosition 과 동일한 0-based. 존재하지 않는 페이지는 오류 → null → 종료.
+    for (let pg = 0; pg <= 5000; pg++) {
+      const ov = pj<any>(safe(() => doc.getPageOverlayImages!(pg)));
+      if (ov == null) break;
+      const entries = [
+        ...(Array.isArray(ov.behind) ? ov.behind : []),
+        ...(Array.isArray(ov.front) ? ov.front : []),
+      ];
+      if (entries.length) {
+        for (const e of entries) {
+          if (e?.mime && e?.base64) flowImg(pg, `data:${e.mime};base64,${e.base64}`, e.bbox?.width, e.bbox?.height);
+        }
+        continue;
+      }
+      const count = typeof ov.imageCount === "number" ? ov.imageCount : 0;
+      if (count <= 0 || pool[pi] === undefined) continue;
+      // 크기: getPageControlLayout 의 그림 컨트롤(문서순) w/h. 바이트: BinData 풀에서 순서대로.
+      const layout = doc.getPageControlLayout ? pj<any>(safe(() => doc.getPageControlLayout!(pg))) : null;
+      const imgs = (Array.isArray(layout?.controls) ? layout.controls : []).filter((c: any) => c?.type === "image");
+      for (let k = 0; k < count && pool[pi] !== undefined; k++) {
+        flowImg(pg, pool[pi++]!, imgs[k]?.w, imgs[k]?.h);
+      }
+    }
+  }
+
   const pages = [...pageBodies.keys()].sort((a, b) => a - b);
   const foot = footerText ? `<div class="hp-footer" style="${footStyle}">${esc(footerText)}</div>` : "";
   const pagesHtml = pages.length
-    ? pages.map((pg) => `<div class="hp-page">${pageBodies.get(pg)}${foot}</div>`).join("\n")
+    ? pages.map((pg) => `<div class="hp-page">${pageBodies.get(pg) ?? ""}${foot}</div>`).join("\n")
     : `<div class="hp-page">${foot}</div>`;
   const title = esc(opts.title ?? "한글 미리보기");
   return `<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
@@ -557,4 +636,64 @@ export function hwpToHybridPreviewHtml(doc: RhwpDoc, opts: { title?: string } = 
   .hp-tbl td{border:1px solid #bbb;vertical-align:middle;padding:3px 6px}
   .hp-tbl p{margin:0}
 </style></head><body>${pagesHtml}${supplement}</body></html>`;
+}
+
+/**
+ * renderPageHtml 한 페이지에서 "콘텐츠가 페이지 높이 밖으로 얼마나 밀렸는지"(px)를 잰다.
+ * rhwp 는 '글 뒤(behind)' floating 배경(예: 상장 테두리)을 흐름 공간으로 잘못 계산해 본문을
+ * 프레임 높이만큼 아래로 밀어버리는 버그가 있다 → 페이지 높이 고정+overflow:hidden 에 잘려
+ * 텍스트가 통째로 사라진다. 이 값이 크면 그 버그에 걸린 페이지다.
+ */
+function pageContentOverflow(pageHtml: string): number {
+  const pageH = Number(pageHtml.match(/class="hwp-page"[^>]*?height:([\d.]+)px/)?.[1] ?? 0);
+  if (!pageH) return 0;
+  let maxBottom = 0;
+  for (const m of pageHtml.matchAll(/top:([\d.]+)px;[^"]*?height:([\d.]+)px/g)) {
+    maxBottom = Math.max(maxBottom, Number(m[1]) + Number(m[2]));
+  }
+  for (const m of pageHtml.matchAll(/top:([\d.]+)px/g)) {
+    maxBottom = Math.max(maxBottom, Number(m[1]));
+  }
+  return maxBottom - pageH;
+}
+
+/**
+ * rhwp 의 HTML 페이지 렌더(renderPageHtml)를 페이지별로 이어붙인 **충실 미리보기**.
+ * rhwp 가 직접 그리므로 이미지(쪽배경·floating 그림)의 위치·크기·z순서, 표·머릿말/꼬리말이
+ * 모두 원본 그대로다. 각 페이지는 절대배치 자립형 HTML(고정 px 크기)이라 외부 CSS 가 필요 없고,
+ * 텍스트는 실제 텍스트라 선택·복사된다.
+ *
+ * 단, rhwp 가 '글 뒤' floating 배경을 흐름으로 잘못 계산해 본문을 페이지 밖으로 크게 밀어내는
+ * 문서(예: 테두리 배경 상장)에서는 텍스트가 잘려 사라진다. 그런 페이지가 감지되면(또는
+ * renderPageHtml 미지원/실패 시) 흐름배치 `hwpToRichPreviewHtml` 로 폴백한다 — 절대좌표는 못
+ * 맞춰도 텍스트·배경이 모두 보인다.
+ */
+export function hwpToFaithfulPreviewHtml(
+  doc: RhwpDoc,
+  opts: { title?: string; rawBytes?: Uint8Array } = {},
+): string {
+  const n = doc.pageCount && doc.renderPageHtml ? safe(() => doc.pageCount!()) ?? 0 : 0;
+  const rendered: string[] = [];
+  let worstOverflow = 0;
+  for (let i = 0; i < n; i++) {
+    const h = safe(() => doc.renderPageHtml!(i));
+    if (!h) continue;
+    rendered.push(h);
+    worstOverflow = Math.max(worstOverflow, pageContentOverflow(h));
+  }
+  // renderPageHtml 미지원/실패, 또는 rhwp 레이아웃 버그로 본문이 페이지 밖으로 크게 밀린 경우
+  // (텍스트 잘림) → 흐름배치 미리보기로 폴백. 임계값 200px(약 페이지 높이의 18%).
+  if (rendered.length === 0 || worstOverflow > 200) return hwpToRichPreviewHtml(doc, opts);
+
+  const pages = rendered.map((h) => `<div class="hp-paper">${h}</div>`);
+  const title = esc(opts.title ?? "한글 미리보기");
+  return `<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
+<style>
+  body{margin:0;background:#eceef0;padding:24px 0;font-family:'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#111}
+  /* rhwp 페이지는 고정 px 크기의 절대배치 HTML. 그대로 종이처럼 가운데 정렬+그림자. */
+  .hp-paper{margin:0 auto 22px;width:fit-content;max-width:100%;background:#fff;
+    box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.10)}
+  .hp-paper .hwp-page{max-width:100%}
+  .hp-paper img{max-width:none}
+</style></head><body>${pages.join("\n")}</body></html>`;
 }

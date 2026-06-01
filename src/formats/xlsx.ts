@@ -15,7 +15,7 @@ import type { Manifest } from "../model/manifest.js";
 import { encodeXlsxToHtml } from "../encode/xlsxToHtml.js";
 import { decodeHtmlToXlsx } from "../decode/htmlToXlsx.js";
 import { readZip, tryPartToText } from "../core/zip.js";
-import { parseXml, collectDeep, deepText, childrenOf, findChildren, findChild, findDeep, attrOf } from "../core/xml.js";
+import { parseXml, collectDeep, deepText, childrenOf, findChildren, findChild, findDeep, attrOf, type XmlNode } from "../core/xml.js";
 import { toPreviewHtml, type PreviewOptions } from "../preview/preview.js";
 import { parseXlsxStyles, type XlsxStyles } from "./xlsx-styles.js";
 import { bytesToBase64 } from "../core/base64.js";
@@ -37,11 +37,15 @@ interface Grid {
 }
 
 const DEFAULT_COL_PX = 64;
+const DEFAULT_ROW_PX = 20; // 엑셀 기본 행 높이(15pt) ≈ 20px
 const ROWHEAD_PX = 42;
+const EMU_PER_PX = 9525; // 914400 EMU/inch ÷ 96 dpi
 /** 엑셀 열 너비(문자 단위) → px 근사. */
 const colWidthToPx = (w: number): number => Math.round(w * 7) + 5;
 /** 포인트(행 높이) → px. */
 const ptToPx = (pt: number): number => Math.round((pt * 96) / 72);
+/** EMU → px(96dpi). */
+const emuToPx = (emu: number): number => Math.round(emu / EMU_PER_PX);
 
 /** sharedStrings.xml → 문자열 배열. */
 function readSharedStrings(parts: Record<string, Uint8Array>): string[] {
@@ -166,7 +170,7 @@ function sheetGrid(xml: string, shared: string[]): Grid {
   };
 }
 
-function renderGrid(g: Grid, styles: XlsxStyles): string {
+function renderGrid(g: Grid, styles: XlsxStyles, images: SheetImage[] = []): string {
   // 가려지는(병합 비-앵커) 셀 집합 + 앵커별 span
   const covered = new Set<string>();
   const span = new Map<string, { cs: number; rs: number }>();
@@ -174,6 +178,30 @@ function renderGrid(g: Grid, styles: XlsxStyles): string {
     span.set(`${m.r1},${m.c1}`, { cs: m.c2 - m.c1 + 1, rs: m.r2 - m.r1 + 1 });
     for (let r = m.r1; r <= m.r2; r++)
       for (let c = m.c1; c <= m.c2; c++) if (!(r === m.r1 && c === m.c1)) covered.add(`${r},${c}`);
+  }
+
+  // 이미지 → from 셀 키로 묶는다(원문처럼 그 셀 위에 겹쳐 그린다).
+  // 격자 밖이거나 병합으로 가려진 셀이 앵커면 가장 가까운 보이는 위치로 끌어온다.
+  const overlays = new Map<string, SheetImage[]>();
+  for (const im of images) {
+    let { row, col } = im;
+    let offX = im.offX;
+    let offY = im.offY;
+    // 병합으로 가려진 앵커 → 병합 앵커 셀로 이동(사이 셀 폭/높이만큼 오프셋 보정)
+    if (covered.has(`${row},${col}`)) {
+      const m = g.merges.find((m) => row >= m.r1 && row <= m.r2 && col >= m.c1 && col <= m.c2);
+      if (m) {
+        for (let c = m.c1; c < col; c++) offX += g.colW.get(c) ?? DEFAULT_COL_PX;
+        for (let r = m.r1; r < row; r++) offY += g.rowH.get(r) ?? DEFAULT_ROW_PX;
+        row = m.r1;
+        col = m.c1;
+      }
+    }
+    // 격자 밖이면 마지막으로 보이는 행/열로 클램프
+    row = Math.min(row, g.rows - 1);
+    col = Math.min(col, g.cols - 1);
+    const key = `${row},${col}`;
+    (overlays.get(key) ?? overlays.set(key, []).get(key)!).push({ ...im, row, col, offX, offY });
   }
 
   // colgroup: 행번호 열 + 각 열 너비(table-layout:fixed 라 폭이 그대로 적용된다)
@@ -197,8 +225,11 @@ function renderGrid(g: Grid, styles: XlsxStyles): string {
       const sp = span.get(key);
       const spanAttr = sp ? `${sp.cs > 1 ? ` colspan="${sp.cs}"` : ""}${sp.rs > 1 ? ` rowspan="${sp.rs}"` : ""}` : "";
       const css = cell?.s !== undefined ? styles.css[cell.s] : undefined;
+      const ov = overlays.get(key);
+      const cls = ov ? ` class="xlsx-imgcell"` : "";
       const styleAttr = css ? ` style="${css}"` : "";
-      tds += `<td${spanAttr}${styleAttr}>${esc(cell?.t ?? "")}</td>`;
+      const imgHtml = ov ? ov.map(imageOverlay).join("") : "";
+      tds += `<td${spanAttr}${cls}${styleAttr}>${esc(cell?.t ?? "")}${imgHtml}</td>`;
     }
     body += `<tr${trStyle}>${tds}</tr>`;
   }
@@ -207,7 +238,22 @@ function renderGrid(g: Grid, styles: XlsxStyles): string {
 
 // ── 이미지(시트 drawing) ───────────────────────────────────────────────────
 
-interface SheetImage { dataUri?: string; name: string; ref: string }
+interface SheetImage {
+  dataUri?: string;
+  name: string;
+  /** 앵커 from 셀(0-기준). 여기에 이미지를 띄운다. */
+  row: number;
+  col: number;
+  /** from 셀 좌상단 기준 오프셋(px). */
+  offX: number;
+  offY: number;
+  /** 표시 크기(px). */
+  w: number;
+  h: number;
+  /** 이미지가 덮는 마지막 셀(0-기준) — 격자를 이 범위까지 넓혀 원문처럼 보이게. */
+  endRow: number;
+  endCol: number;
+}
 
 const IMG_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
@@ -254,8 +300,19 @@ function dataUriFor(parts: Record<string, Uint8Array>, path: string): string | u
   return `data:${mime};base64,${bytesToBase64(buf)}`;
 }
 
-/** 한 시트에 앵커된 이미지들(표시 가능하면 dataUri, 아니면 이름+위치만). */
-function sheetImages(parts: Record<string, Uint8Array>, sheetPath: string): SheetImage[] {
+/** 앵커의 from/to 자식(xdr:col/colOff/row/rowOff) → 셀+오프셋. */
+function anchorPos(node: XmlNode): { col: number; colOff: number; row: number; rowOff: number } {
+  const ch = childrenOf(node);
+  const n = (tag: string): number => Number(deepText(findChild(ch, tag) ?? ({} as XmlNode)) || "0");
+  return { col: n("xdr:col"), colOff: n("xdr:colOff"), row: n("xdr:row"), rowOff: n("xdr:rowOff") };
+}
+
+/**
+ * 한 시트에 앵커된 이미지들. twoCellAnchor 는 from~to 셀 범위로, oneCellAnchor 는
+ * from + ext(크기)로 위치/크기를 px 환산한다. 격자의 열폭/행높이를 그대로 써서
+ * 원문처럼 해당 셀 위에 겹쳐 그린다.
+ */
+function sheetImages(parts: Record<string, Uint8Array>, sheetPath: string, g: Grid): SheetImage[] {
   const sheetRels = readRels(parts, relsPathFor(sheetPath));
   const drawingTarget = [...sheetRels.values()].find((t) => t.includes("drawings/drawing"));
   if (!drawingTarget) return [];
@@ -264,6 +321,9 @@ function sheetImages(parts: Record<string, Uint8Array>, sheetPath: string): Shee
   if (!xml) return [];
   const drawRels = readRels(parts, relsPathFor(drawingPath));
   const tree = parseXml(xml);
+
+  const colPx = (c: number): number => g.colW.get(c) ?? DEFAULT_COL_PX;
+  const rowPx = (r: number): number => g.rowH.get(r) ?? DEFAULT_ROW_PX;
 
   const anchors = [...collectDeep(tree, "xdr:twoCellAnchor"), ...collectDeep(tree, "xdr:oneCellAnchor")];
   const out: SheetImage[] = [];
@@ -274,29 +334,62 @@ function sheetImages(parts: Record<string, Uint8Array>, sheetPath: string): Shee
     const target = drawRels.get(embed);
     if (!target) continue;
     const mediaPath = resolvePath(drawingPath, target);
-    const from = findDeep([anchor], "xdr:from");
-    const col = from ? Number(deepText(findChild(childrenOf(from), "xdr:col") ?? {}) || "0") : 0;
-    const row = from ? Number(deepText(findChild(childrenOf(from), "xdr:row") ?? {}) || "0") : 0;
+    const fromNode = findDeep([anchor], "xdr:from");
+    if (!fromNode) continue;
+    const from = anchorPos(fromNode);
+    const offX = emuToPx(from.colOff);
+    const offY = emuToPx(from.rowOff);
+
+    let w: number;
+    let h: number;
+    let endRow: number;
+    let endCol: number;
+    const toNode = findDeep([anchor], "xdr:to");
+    if (toNode) {
+      // twoCellAnchor: from~to 사이 셀 폭/높이 합 + 양끝 오프셋차
+      const to = anchorPos(toNode);
+      let width = -offX + emuToPx(to.colOff);
+      for (let c = from.col; c < to.col; c++) width += colPx(c);
+      let height = -offY + emuToPx(to.rowOff);
+      for (let r = from.row; r < to.row; r++) height += rowPx(r);
+      w = Math.max(1, width);
+      h = Math.max(1, height);
+      endRow = to.row;
+      endCol = to.col;
+    } else {
+      // oneCellAnchor: ext(cx,cy) 가 크기 → 끝 셀은 from 에서 크기만큼 걸어 추정
+      const ext = findDeep([anchor], "xdr:ext");
+      w = Math.max(1, emuToPx(Number(attrOf(ext ?? ({} as XmlNode), "cx") || "0")));
+      h = Math.max(1, emuToPx(Number(attrOf(ext ?? ({} as XmlNode), "cy") || "0")));
+      endCol = from.col;
+      for (let acc = offX + w, c = from.col; acc > colPx(c) && c < from.col + MAX_COLS; c++, endCol = c) acc -= colPx(c);
+      endRow = from.row;
+      for (let acc = offY + h, r = from.row; acc > rowPx(r) && r < from.row + MAX_ROWS; r++, endRow = r) acc -= rowPx(r);
+    }
+
     out.push({
       dataUri: dataUriFor(parts, mediaPath),
       name: mediaPath.split("/").pop() ?? "image",
-      ref: `${colLetter(col)}${row + 1}`,
+      row: from.row,
+      col: from.col,
+      offX,
+      offY,
+      w,
+      h,
+      endRow,
+      endCol,
     });
   }
   return out;
 }
 
-function renderImages(imgs: SheetImage[]): string {
-  if (!imgs.length) return "";
-  const cards = imgs
-    .map((im) => {
-      const cap = `<figcaption>${esc(im.ref)} · ${esc(im.name)}</figcaption>`;
-      if (im.dataUri) return `<figure><img src="${im.dataUri}" alt="${esc(im.name)}"/>${cap}</figure>`;
-      const ext = (im.name.split(".").pop() ?? "").toUpperCase();
-      return `<figure class="ph"><div class="ph-box">🖼<br/><small>${ext} 형식<br/>브라우저 미표시</small></div>${cap}</figure>`;
-    })
-    .join("");
-  return `<div class="xlsx-images"><div class="xlsx-imgs-title">📷 이미지 ${imgs.length}개</div><div class="xlsx-imgs">${cards}</div></div>`;
+/** 한 이미지 → 셀 위에 겹칠 절대배치 마크업(<td> 안에 넣는다). */
+function imageOverlay(im: SheetImage): string {
+  const pos = `left:${im.offX}px;top:${im.offY}px;width:${im.w}px;height:${im.h}px`;
+  if (im.dataUri)
+    return `<img class="xlsx-cell-img" style="${pos}" src="${im.dataUri}" alt="${escAttr(im.name)}" title="${escAttr(im.name)}"/>`;
+  const ext = (im.name.split(".").pop() ?? "").toUpperCase();
+  return `<span class="xlsx-cell-img xlsx-img-ph" style="${pos}" title="${escAttr(im.name)}">🖼 ${esc(ext)}</span>`;
 }
 
 export function xlsxToPreviewHtml(bytes: Uint8Array, opts: PreviewOptions = {}): string {
@@ -307,9 +400,14 @@ export function xlsxToPreviewHtml(bytes: Uint8Array, opts: PreviewOptions = {}):
   const body = sheetList(parts)
     .map(({ name, path }) => {
       const g = sheetGrid(tryPartToText(parts, path) ?? "", shared);
+      const imgs = sheetImages(parts, path, g);
+      // 이미지가 덮는 범위 밖이면 그만큼 격자를 넓혀 원문처럼 이미지 아래 격자가 깔리게 한다.
+      for (const im of imgs) {
+        g.rows = Math.min(MAX_ROWS, Math.max(g.rows, im.endRow + 1));
+        g.cols = Math.min(MAX_COLS, Math.max(g.cols, im.endCol + 1));
+      }
       const note = g.truncated ? `<div class="xlsx-note">⚠ 미리보기 상한(${MAX_ROWS}행 × ${MAX_COLS}열)까지만 표시</div>` : "";
-      const imgs = renderImages(sheetImages(parts, path));
-      return `<section class="xlsx-sheet"><h2>${esc(name)}</h2><div class="xlsx-scroll">${renderGrid(g, styles)}</div>${note}${imgs}</section>`;
+      return `<section class="xlsx-sheet"><h2>${esc(name)}</h2><div class="xlsx-scroll">${renderGrid(g, styles, imgs)}</div>${note}</section>`;
     })
     .join("\n");
 
@@ -325,14 +423,11 @@ export function xlsxToPreviewHtml(bytes: Uint8Array, opts: PreviewOptions = {}):
   .xlsx-colh, .xlsx-rowh, .xlsx-corner { background:#f3f4f6; color:#6b7280; font-weight:600;
     text-align:center; font-size:11px; }
   .xlsx-note { font-size:11.5px; color:#9aa0a6; margin-top:6px; }
-  .xlsx-images { margin-top:14px; }
-  .xlsx-imgs-title { font-size:12.5px; color:#6b7280; margin-bottom:8px; }
-  .xlsx-imgs { display:flex; flex-wrap:wrap; gap:14px; }
-  .xlsx-imgs figure { margin:0; border:1px solid #d6d9dd; border-radius:8px; padding:8px; background:#fff; }
-  .xlsx-imgs img { max-width:280px; max-height:240px; display:block; }
-  .xlsx-imgs .ph-box { width:200px; height:140px; display:grid; place-items:center; text-align:center;
-    color:#9aa0a6; background:#f3f4f6; border-radius:6px; font-size:13px; }
-  .xlsx-imgs figcaption { font-size:11px; color:#9aa0a6; margin-top:6px; text-align:center; }
+  /* 셀 위에 겹쳐 그리는 이미지(원문 그대로): 앵커 셀을 기준점으로 절대배치, 이웃 셀로 넘쳐도 보이게. */
+  .xlsx-grid td.xlsx-imgcell { position:relative; overflow:visible; }
+  .xlsx-cell-img { position:absolute; z-index:3; object-fit:fill; }
+  .xlsx-img-ph { display:grid; place-items:center; background:#f3f4f6; border:1px solid #d6d9dd;
+    border-radius:4px; color:#9aa0a6; font-size:12px; box-sizing:border-box; }
   `;
   // 스프레드시트는 페이지 카드(고정 폭)에 가두지 않고 전체 폭 + 가로 스크롤로 보여준다.
   return toPreviewHtml(`<div class="xlsx-wrap">${body}</div>`, { ...opts, css: (opts.css ?? "") + css });
@@ -358,4 +453,7 @@ export const xlsxAdapter: FormatAdapter = {
 
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function escAttr(s: string): string {
+  return esc(s).replace(/"/g, "&quot;");
 }

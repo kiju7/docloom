@@ -331,3 +331,15 @@ function collectImages(streams: Record<string, Uint8Array>): string[] {
     })
     .filter(Boolean);
 }
+
+/**
+ * HWP 바이트의 `BinData/` 임베디드 그림을 문서순(BIN0001…) data URI 배열로 추출.
+ * rhwp 리치 미리보기가 floating(페이지앵커) 그림을 노출하지 못할 때의 보강용.
+ */
+export function extractHwpBinImages(hwp: Uint8Array): string[] {
+  try {
+    return collectImages(readCfb(hwp).streams);
+  } catch {
+    return [];
+  }
+}

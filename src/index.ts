@@ -36,7 +36,8 @@ export type { CsvDialect } from "./formats/csv.js";
 export { htmlAdapter, htmlEncode, htmlDecode, htmlToPreviewHtml } from "./formats/html.js";
 export { mdAdapter, mdEncode, mdDecode, mdToPreviewHtml, mdToHtml, htmlToMd } from "./formats/md.js";
 export { txtAdapter, txtEncode, txtDecode, txtToPreviewHtml } from "./formats/txt.js";
-export { pdfToPreviewHtml, pdfModelToPreviewHtml, extractPdfModel, buildPdfFromModel } from "./formats/pdf.js";
+export { pdfToPreviewHtml, pdfModelToPreviewHtml, extractPdfModel, buildPdfFromModel,
+         extendPdfModel, pdfModelPagesHtml, pdfModelTotalPages, pdfModelFontFaceCss } from "./formats/pdf.js";
 export type { PdfEditModel } from "./formats/pdf.js";
 // 플러그형 이미지 디코더 훅 — JPX(JPEG2000)/JBIG2 등을 외부 라이브러리로 처리.
 export { registerImageDecoder, unregisterImageDecoder, clearImageDecoders } from "./core/pdf/imageDecoders.js";
@@ -44,7 +45,7 @@ export type { ImageDecoder, ImageDecodeInfo, DecodedImage } from "./core/pdf/ima
 
 // ── rhwp 기반 HWP/HWPX 편집 채널(opt-in) — 표 셀까지 LLM 이 읽고 수정 ────────────
 // rhwp WASM 은 호출측이 초기화한 HwpDocument 를 인자로 받는다(코어는 WASM 미의존).
-export { hwpToEditableHtml, applyHwpEdits, hwpToRichPreviewHtml, hwpToHybridPreviewHtml } from "./rhwp/hwpEdit.js";
+export { hwpToEditableHtml, applyHwpEdits, hwpToRichPreviewHtml, hwpToHybridPreviewHtml, hwpToFaithfulPreviewHtml } from "./rhwp/hwpEdit.js";
 export type { RhwpDoc } from "./rhwp/hwpEdit.js";
 
 // ── 아래한글 HWPX (OWPML) 왕복 API ──────────────────────────────────────────

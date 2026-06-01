@@ -9,17 +9,30 @@
  */
 import { unzlibSync, inflateSync } from "fflate";
 
-/** zlib(권장) → 실패 시 raw deflate 로 재시도. PDF FlateDecode 는 보통 zlib 래핑이다. */
+/** zlib 헤더(CMF/FLG) 모양인가: 압축법 8(deflate) + 체크 % 31 === 0. */
+function looksZlib(data: Uint8Array): boolean {
+  return data.length > 2 && (data[0]! & 0x0f) === 8 && (((data[0]! << 8) | data[1]!) % 31) === 0;
+}
+
+/**
+ * zlib(권장) → 실패 시 raw deflate 로 재시도. PDF FlateDecode 는 보통 zlib 래핑이다.
+ *
+ * 잘린 스트림(/Length 가 짧거나 트레일러 누락) 주의: unzlibSync 는 Adler 검증에서 "unexpected
+ * EOF" 로 던지지만 deflate 페이로드 자체는 멀쩡한 경우가 많다. 이때 헤더 포함 전체를 raw inflate
+ * 로 돌리면 zlib 헤더(예: 78 DA)를 deflate 블록으로 오독해 **검증 없이 쓰레기를 뱉고도 성공**한다.
+ * 그래서 zlib 헤더가 보이면 raw 폴백은 반드시 앞 2바이트를 건너뛴 페이로드로 한다(트레일러 검증 생략).
+ */
 export function flateDecode(data: Uint8Array): Uint8Array {
   try {
     return unzlibSync(data);
   } catch {
+    const wrapped = looksZlib(data);
     try {
-      return inflateSync(data);
+      return inflateSync(wrapped ? data.subarray(2) : data);
     } catch {
-      // 앞 2바이트(zlib 헤더)를 건너뛰고 raw 로 한 번 더
+      // 반대 해석으로 마지막 시도(헤더 판정이 틀렸을 가능성).
       try {
-        return inflateSync(data.subarray(2));
+        return inflateSync(wrapped ? data : data.subarray(2));
       } catch {
         return new Uint8Array(0);
       }

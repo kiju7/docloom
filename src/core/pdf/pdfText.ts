@@ -10,6 +10,7 @@
  * ToUnicode 없는 CID 폰트는 글자를 복원할 수 없어 □ 로 표시한다.
  */
 import { PdfDocument, PdfLexer, PName, PStream, type PDict, type PdfValue } from "./pdfObjects.js";
+import { embedFontFace } from "./pdfFontEmbed.js";
 
 /** 행렬 [a b c d e f] (PDF 텍스트/그래픽 공통). */
 type Mat = [number, number, number, number, number, number];
@@ -38,6 +39,10 @@ export interface TextItem {
   italic: boolean;
   /** 그리기 순서(이미지·벡터·텍스트 공통 시퀀스) — 층위 보존용. */
   seq: number;
+  /** 런의 원본 가로 폭(PDF 단위). 대체폰트가 더 넓게 그려질 때 이 폭으로 압축(scaleX)해 잘림 방지. */
+  w?: number;
+  /** 임베디드 폰트 @font-face family(있으면). 런 결합은 같은 ff 끼리만. */
+  ff?: string;
 }
 export interface PageText {
   wPt: number;
@@ -61,6 +66,8 @@ interface FontModel {
   defaultWidth: number;
   bold: boolean;
   italic: boolean;
+  /** 임베디드 폰트 @font-face family(있으면). 없으면 대체폰트로 그린다. */
+  embedFamily?: string;
 }
 
 const latin1 = new TextDecoder("latin1");
@@ -184,7 +191,11 @@ function buildFont(doc: PdfDocument, fontDict: PDict): FontModel {
     if (dbf instanceof PName && /bold|black|heavy/i.test(dbf.name)) bold = true;
   }
 
-  return { twoByte, toUnicode, unicodeCodes, widths, defaultWidth, bold, italic };
+  // 임베디드 폰트 임베딩(단순/CID, TrueType/OpenType/CFF). 실패 시 대체폰트로 폴백.
+  // 렌더가 내보내는 유니코드(codeToText)와 글리프를 잇도록 동일 매핑정보를 넘긴다.
+  const embedFamily = embedFontFace(doc, fontDict, { toUnicode, unicodeCodes, twoByte, widths, defaultWidth }) ?? undefined;
+
+  return { twoByte, toUnicode, unicodeCodes, widths, defaultWidth, bold, italic, embedFamily };
 }
 
 /** CID /W 배열 파싱: "c [w…]" 또는 "cFirst cLast w". */
@@ -347,7 +358,7 @@ export function extractPageText(
           const textState: Mat = [fontSize * hScale, 0, 0, fontSize, 0, rise];
           const trm = mul(textState, mul(tm, ctm));
           const size = Math.abs(trm[3]) || Math.abs(fontSize);
-          items.push({ x: trm[4], y: trm[5], size, text: ch, bold: font.bold, italic: font.italic, seq: seq++ });
+          items.push({ x: trm[4], y: trm[5], size, text: ch, bold: font.bold, italic: font.italic, seq: seq++, ff: font.embedFamily });
         }
         const w0 = (font.widths.get(code) ?? font.defaultWidth) / 1000;
         const isSpace = !font.twoByte && code === 0x20;
@@ -507,15 +518,18 @@ function coalesceRuns(items: TextItem[]): TextItem[] {
       Math.abs(it.y - cur.y) < cur.size * 0.45 && // 같은 줄
       it.size > cur.size * 0.8 && it.size < cur.size * 1.25 && // 같은 크기
       it.bold === cur.bold && it.italic === cur.italic && // 같은 굵기/기울임
+      it.ff === cur.ff && // 같은 폰트(임베디드 family)
       it.x >= curEnd - cur.size * 0.5 && // 역방향 큰 점프 아님
       it.x <= curEnd + cur.size * 1.3; // 열 경계만큼 멀지 않음
     if (merge && cur) {
       cur.text += it.text;
       curEnd = it.x + estW(it);
+      cur.w = curEnd - cur.x; // 런이 늘어날 때마다 원본 오른쪽 끝까지의 폭 갱신
     } else {
       cur = { ...it };
       out.push(cur);
       curEnd = it.x + estW(it);
+      cur.w = curEnd - cur.x;
     }
   }
   // 순수 공백 런은 버린다(시각적 의미 없음).
