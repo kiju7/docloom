@@ -4,7 +4,14 @@
 
 **문서를 양식 그대로 미리보고, HTML로 편집한 뒤, 원본 포맷으로 되돌리는 TypeScript 라이브러리**
 
-[![Live Demo](https://img.shields.io/badge/▶_라이브_데모-kiju7.github.io/docloom-2563eb)](https://kiju7.github.io/docloom/)
+<br>
+
+[![데모 열기](https://img.shields.io/badge/%E2%96%B6%20%20브라우저에서%20바로%20써보기-2563eb?style=for-the-badge&logoColor=white)](https://kiju7.github.io/docloom/)
+
+<sub>문서를 드래그하면 즉시 미리보기 · 업로드/저장 없는 100% 브라우저 처리</sub>
+
+<br>
+
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Pure TS](https://img.shields.io/badge/no%20LibreOffice-pure%20TS-orange)
