@@ -69,6 +69,51 @@ npx serve demo        # 또는 demo/index.html 직접 열기
 
 파일을 드래그하면 포맷을 자동 판별해 미리보기한다.
 
+## 다른 언어에서 쓰기 (HTTP API)
+
+docloom은 Node/TS 라이브러리다. Python·Go·Java·C++ 등에서는 **작은 HTTP 서버로 띄워** 호출한다.
+저장소에 의존성 없는 서버(`server.mjs`)가 들어 있다:
+
+```bash
+npm run build
+npm run serve         # http://localhost:8080
+```
+
+| 엔드포인트 | 입력 | 출력 |
+|---|---|---|
+| `POST /preview` | 문서 바이트 | 미리보기 HTML |
+| `POST /encode` | 문서 바이트 | `{ html, manifest }` (JSON) |
+| `POST /decode` | `/encode` 응답 JSON | 양식 보존한 문서 바이트 |
+
+> 왕복은 `/encode` 응답 JSON을 그대로 `/decode`에 돌려보내면 된다(`manifest` 내부 바이너리는 서버가 알아서 처리).
+
+**Python**
+```python
+import requests
+html = requests.post("http://localhost:8080/preview",
+                     data=open("a.hwpx", "rb").read()).text
+open("preview.html", "w").write(html)
+```
+
+**Go**
+```go
+b, _ := os.ReadFile("a.docx")
+resp, _ := http.Post("http://localhost:8080/preview", "application/octet-stream", bytes.NewReader(b))
+html, _ := io.ReadAll(resp.Body)
+```
+
+**Java**
+```java
+var req = HttpRequest.newBuilder(URI.create("http://localhost:8080/preview"))
+    .POST(HttpRequest.BodyPublishers.ofFile(Path.of("a.pdf"))).build();
+String html = HttpClient.newHttpClient().send(req, BodyHandlers.ofString()).body();
+```
+
+**C++ / 그 외** — `curl`로 동일하게:
+```bash
+curl --data-binary @a.docx http://localhost:8080/preview -o preview.html
+```
+
 ## 어떻게 양식을 보존하나
 
 <div align="center">

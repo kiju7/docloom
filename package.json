@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "html": "tsx scripts/to-html.ts",
+    "serve": "node server.mjs",
     "demo:rhwp": "cp node_modules/@rhwp/core/rhwp.js node_modules/@rhwp/core/rhwp_bg.wasm demo/",
     "demo:build": "esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=demo/docloom.mjs && npm run demo:rhwp",
     "demo": "npm run demo:build && echo '데모 준비 완료 → 브라우저에서 demo/index.html 열기 (또는: npx serve demo)'"
