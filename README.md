@@ -1,6 +1,6 @@
 <div align="center">
 
-# docloom
+<img src="./docs/docloom-lockup.svg" alt="docloom" height="58">
 
 **문서를 양식 그대로 미리보고, HTML로 편집한 뒤, 원본 포맷으로 되돌리는 TypeScript 라이브러리**
 

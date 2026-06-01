@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>docloom · Office 미리보기 데모</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
 <style>
   :root {
     --bg:#f4f6fb; --bg2:#eef1f8;
@@ -32,12 +33,11 @@
 
   /* ───── Header ───── */
   header { display:flex; align-items:center; gap:13px; margin-bottom:26px; }
-  .logo {
-    width:42px; height:42px; border-radius:12px; display:grid; place-items:center;
-    background:linear-gradient(135deg,var(--accent),var(--accent2)); font-weight:800; font-size:19px; color:#fff;
-    box-shadow:0 8px 20px rgba(91,108,255,.32);
-  }
+  .logo { width:42px; height:42px; display:block; flex:none;
+    filter:drop-shadow(0 8px 18px rgba(91,108,255,.3)); }
+  .logo svg { width:100%; height:100%; display:block; }
   header h1 { font-size:22px; margin:0; letter-spacing:-.3px; font-weight:750; }
+  header h1 .loom { color:var(--accent); }
 
   /* ───── Idle landing (hero + drop) ───── */
   .idle { text-align:center; padding:14px 0 0; animation:rise .3s cubic-bezier(.2,.7,.2,1); }
@@ -182,8 +182,22 @@
 <body>
 <div class="wrap">
   <header>
-    <div class="logo">d</div>
-    <h1>docloom</h1>
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#5b6cff"/><stop offset="1" stop-color="#8b5bff"/></linearGradient></defs>
+        <rect x="4" y="4" width="56" height="56" rx="17" fill="url(#lg)"/>
+        <path d="M19 13 H39 L47 21 V49 q0 2 -2 2 H19 q-2 0 -2 -2 V15 q0 -2 2 -2 Z" fill="#fff"/>
+        <path d="M39 13 L47 21 H39 Z" fill="#cdd5ff"/>
+        <g stroke="#5b6cff" stroke-width="2.6" stroke-linecap="round">
+          <line x1="23" y1="24" x2="43" y2="24"/><line x1="23" y1="31" x2="43" y2="31"/>
+          <line x1="23" y1="38" x2="43" y2="38"/><line x1="23" y1="45" x2="40" y2="45"/></g>
+        <rect x="32" y="20" width="4" height="29" rx="2" fill="url(#lg)"/>
+        <g stroke="#5b6cff" stroke-width="2.6" stroke-linecap="round">
+          <line x1="23" y1="24" x2="43" y2="24"/><line x1="23" y1="38" x2="43" y2="38"/></g>
+      </svg>
+    </span>
+    <h1><span class="doc">doc</span><span class="loom">loom</span></h1>
   </header>
 
   <!-- IDLE: hero landing + drop zone -->
@@ -247,7 +261,7 @@
   import { previewHtml, adapterFor, encode, decode, editablePreviewHtml, formatFromFilename,
            extractPdfModel, pdfModelToPreviewHtml, buildPdfFromModel,
            extendPdfModel, pdfModelPagesHtml, pdfModelTotalPages, pdfModelFontFaceCss,
-           hwpToEditableHtml, applyHwpEdits, hwpToRichPreviewHtml } from "./docloom.mjs?v=20260601ad-pdfexports";
+           hwpToEditableHtml, applyHwpEdits, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260601ae-hwptree";
   // 한글(.hwp/.hwpx) 충실 렌더 — rhwp(Rust+WASM) 의 Canvas 렌더러(주 경로) 사용.
   import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260601";
 
@@ -265,13 +279,13 @@
     }
     return rhwpReady;
   }
-  // 한글 바이트 → 미리보기 HTML. 흐름배치 미리보기(텍스트·표를 읽기순서로 흘려 배치) — 모든
-  // 문서에 일관되게 읽기 좋은 레이아웃. 이미지(floating·쪽배경)는 해당 페이지에 표시크기로 넣는다.
-  // (rhwp 의 절대좌표 renderPageHtml 은 일부 문서에서 본문이 페이지 밖으로 밀려 깨져 쓰지 않음.)
+  // 한글 바이트 → 미리보기 HTML. rhwp 렌더트리(계층)를 흐름 배치로 렌더 — 중첩표(표 안의 표)·셀
+  // 안 이미지를 올바른 셀에 넣고, 표 배경/테두리/병합/글자스타일까지 원본대로. 절대좌표를 안 써서
+  // 상장류 텍스트 밀림 버그를 피한다. (렌더트리 미지원 시 흐름배치로 자동 폴백.)
   async function renderHangul(bytes, name) {
     await ensureRhwp();
     const doc = new HwpDocument(bytes);
-    return hwpToRichPreviewHtml(doc, { title: name, rawBytes: bytes });
+    return hwpToTreePreviewHtml(doc, { title: name, rawBytes: bytes });
   }
 
   const $ = (id) => document.getElementById(id);
