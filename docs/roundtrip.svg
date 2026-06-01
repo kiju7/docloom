@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 250" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowLoop" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- card -->
+  <rect x="1" y="1" width="778" height="248" rx="14" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
+
+  <!-- 원본 문서 -->
+  <rect x="28" y="96" width="150" height="62" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="103" y="123" text-anchor="middle" font-size="15" font-weight="700" fill="#0f172a">원본 문서</text>
+  <text x="103" y="143" text-anchor="middle" font-size="11" fill="#64748b">docx · hwpx · pdf …</text>
+
+  <!-- encode arrow -->
+  <line x1="182" y1="127" x2="252" y2="127" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="217" y="116" text-anchor="middle" font-size="12" font-weight="600" fill="#2563eb">encode</text>
+
+  <!-- 편집 레이어 산출물 -->
+  <rect x="258" y="84" width="184" height="40" rx="9" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="350" y="103" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">html</text>
+  <text x="350" y="117" text-anchor="middle" font-size="10.5" fill="#3b82f6">편집용 본문</text>
+
+  <rect x="258" y="130" width="184" height="40" rx="9" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="350" y="149" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">manifest</text>
+  <text x="350" y="163" text-anchor="middle" font-size="10.5" fill="#7c3aed">복원 키트 (원본 보관)</text>
+
+  <!-- 편집 루프 (html만) -->
+  <path d="M300 84 C300 58, 400 58, 400 84" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrowLoop)"/>
+  <text x="350" y="50" text-anchor="middle" font-size="11" fill="#64748b">별도 레이어가 html 만 편집</text>
+
+  <!-- decode arrow -->
+  <line x1="448" y1="127" x2="518" y2="127" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="483" y="116" text-anchor="middle" font-size="12" font-weight="600" fill="#2563eb">decode</text>
+
+  <!-- 복원 문서 -->
+  <rect x="524" y="96" width="172" height="62" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+  <text x="610" y="123" text-anchor="middle" font-size="15" font-weight="700" fill="#065f46">복원 문서</text>
+  <text x="610" y="143" text-anchor="middle" font-size="11" fill="#059669">양식 100% 보존</text>
+
+  <!-- 미리보기 부가 경로 -->
+  <line x1="103" y1="158" x2="103" y2="206" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrowLoop)"/>
+  <rect x="28" y="206" width="220" height="32" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="138" y="226" text-anchor="middle" font-size="11.5" fill="#475569">previewHtml → 브라우저 미리보기 (보기 전용)</text>
+</svg>

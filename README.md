@@ -71,16 +71,14 @@ npx serve demo        # 또는 demo/index.html 직접 열기
 
 ## 어떻게 양식을 보존하나
 
+<div align="center">
+  <img src="./docs/roundtrip.svg" alt="docloom 왕복 흐름: 원본 문서를 encode 하면 편집용 html 과 복원 키트 manifest 가 나오고, html 만 편집한 뒤 decode 하면 양식이 100% 보존된 문서로 돌아온다" width="100%">
+</div>
+
 encode 결과는 **편집용 `html` + 복원 키트 `manifest`** 한 쌍이다.
 manifest가 원본 전체(스타일·머리말·이미지·표 등)를 보관하므로, decode는 **본문만** 재생성하고
 나머지는 원본 그대로 둔다 → **양식이 물리적으로 안 깨진다.** 아직 이해 못 하는 요소(표·도형)는
 원본을 그대로 보관(frozen)해 왕복이 깨지지 않는다.
-
-```
-문서 ──encode──> html(편집)  +  manifest(복원 키트)
-                      │ (별도 레이어가 html 만 편집)
-html + manifest ──decode──> 문서 (양식 100% 보존)
-```
 
 ## 주요 API
 
