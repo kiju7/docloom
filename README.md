@@ -6,7 +6,7 @@
 
 <br>
 
-[![데모 열기](https://img.shields.io/badge/%E2%96%B6%20%20브라우저에서%20바로%20써보기-2563eb?style=for-the-badge&logoColor=white)](https://kiju7.github.io/docloom/)
+[<img src="./docs/demo-button.svg" alt="라이브 데모 보기" height="52">](https://kiju7.github.io/docloom/)
 
 <sub>문서를 드래그하면 즉시 미리보기 · 업로드/저장 없는 100% 브라우저 처리</sub>
 
