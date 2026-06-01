@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>docloom · Office 미리보기 데모</title>
+<style>
+  :root {
+    --bg:#f4f6fb; --bg2:#eef1f8;
+    --panel:#ffffff; --panel2:#f8f9fd; --line:#e3e7f0; --line2:#eceff5;
+    --fg:#1c2233; --muted:#6b748c; --soft:#8a93a8;
+    --accent:#5b6cff; --accent2:#8b5bff; --accentSoft:#eef0ff;
+    --ok:#16a34a; --okSoft:#e8f7ee; --err:#e11d48; --errSoft:#fdecef;
+    --radius:16px; --radius-sm:11px;
+    --shadow-sm:0 1px 3px rgba(20,28,60,.06), 0 1px 2px rgba(20,28,60,.04);
+    --shadow-md:0 8px 28px rgba(40,52,100,.10);
+    --shadow-lg:0 24px 60px rgba(40,52,100,.16);
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body {
+    margin:0; color:var(--fg);
+    font-family:-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;
+    -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(900px 480px at 88% -8%, #e7ebff 0%, transparent 60%),
+      radial-gradient(760px 420px at -8% 108%, #f0e8ff 0%, transparent 55%),
+      linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+    background-attachment:fixed;
+  }
+  .wrap { max-width:1080px; margin:0 auto; padding:30px 24px 56px; }
+
+  /* ───── Header ───── */
+  header { display:flex; align-items:center; gap:13px; margin-bottom:26px; }
+  .logo {
+    width:42px; height:42px; border-radius:12px; display:grid; place-items:center;
+    background:linear-gradient(135deg,var(--accent),var(--accent2)); font-weight:800; font-size:19px; color:#fff;
+    box-shadow:0 8px 20px rgba(91,108,255,.32);
+  }
+  header h1 { font-size:22px; margin:0; letter-spacing:-.3px; font-weight:750; }
+
+  /* ───── Drop zone (idle) ───── */
+  .drop {
+    position:relative; border:1.5px dashed #c7cee3; border-radius:var(--radius);
+    background:linear-gradient(180deg, var(--panel), var(--panel2));
+    padding:52px 28px; text-align:center; cursor:pointer; transition:.2s cubic-bezier(.4,0,.2,1);
+    overflow:hidden; box-shadow:var(--shadow-sm);
+  }
+  .drop:hover { border-color:var(--accent); box-shadow:var(--shadow-md); transform:translateY(-2px); }
+  .drop .ico {
+    width:62px; height:62px; margin:0 auto 4px; border-radius:16px; display:grid; place-items:center;
+    background:linear-gradient(135deg,var(--accentSoft),#f3ecff); font-size:30px;
+    box-shadow:inset 0 0 0 1px rgba(91,108,255,.12);
+    transition:.2s cubic-bezier(.4,0,.2,1);
+  }
+  .drop:hover .ico { transform:translateY(-3px) scale(1.04); }
+  .drop h2 { margin:14px 0 5px; font-size:16.5px; font-weight:700; letter-spacing:-.2px; }
+  .drop .sub { font-size:13px; color:var(--muted); }
+  .drop .browse { color:var(--accent); font-weight:700; }
+  .drop:hover .browse { text-decoration:underline; }
+  .secure {
+    margin-top:18px; display:inline-flex; align-items:center; gap:7px;
+    font-size:11.5px; color:var(--muted); padding:5px 13px; border-radius:999px;
+    background:var(--okSoft); border:1px solid #cdeed7;
+  }
+  .secure b { color:#15803d; font-weight:700; }
+  .drop .err {
+    margin-top:16px; display:none; font-size:12.5px; color:var(--err); font-weight:650;
+  }
+  input[type=file]{ display:none; }
+
+  /* ───── Workspace (after a file is loaded) ───── */
+  .workspace {
+    display:none; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden;
+    background:var(--panel); box-shadow:var(--shadow-lg);
+    animation:rise .28s cubic-bezier(.2,.7,.2,1);
+  }
+  @keyframes rise { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+  /* file identity strip */
+  .filebar { display:flex; align-items:center; gap:11px; padding:11px 15px;
+    background:var(--panel); border-bottom:1px solid var(--line2); }
+  .badge { font-size:10.5px; padding:4px 10px; border-radius:999px; font-weight:800; letter-spacing:.5px; text-transform:uppercase; flex:none; }
+  .badge.docx{ background:#e4edff; color:#2f6bdb; } .badge.pptx{ background:#ffe7ec; color:#d6446a; }
+  .badge.xlsx{ background:#e1f6ec; color:#168a52; } .badge.q{ background:#eceff5; color:#8a93a8; }
+  .badge.csv{ background:#e6f7f0; color:#0d8a5f; } .badge.pdf{ background:#ffe7e7; color:#d6342c; }
+  .badge.hwpx, .badge.hwp{ background:#eef0ff; color:#5b6cff; }
+  .badge.doc{ background:#e4edff; color:#2f6bdb; } .badge.ppt{ background:#ffe7ec; color:#d6446a; }
+  .badge.xls{ background:#e1f6ec; color:#168a52; }
+  .badge.html{ background:#fdeede; color:#c2680c; } .badge.md{ background:#eef3fb; color:#4b5563; }
+  .badge.txt{ background:#eef1f4; color:#566072; }
+  .fname { color:var(--fg); font-weight:650; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .msg { font-size:12.5px; flex:none; }
+  .msg.ok { color:var(--ok); font-weight:650; } .msg.err { color:var(--err); font-weight:650; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid #d7dcec;
+    border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .filebar .grow { margin-left:auto; }
+  .ghostbtn {
+    height:30px; padding:0 13px; border-radius:8px; border:1px solid var(--line);
+    background:var(--panel); color:var(--muted); font-size:12px; font-weight:700; cursor:pointer;
+    display:inline-flex; align-items:center; gap:6px; transition:.15s; flex:none;
+  }
+  .ghostbtn:hover { color:var(--accent); border-color:#cfd6ff; background:var(--accentSoft); }
+
+  /* browser chrome */
+  .stage-bar { display:flex; align-items:center; gap:10px; padding:10px 15px;
+    background:linear-gradient(180deg,#f7f8fc,#eff2f8); border-bottom:1px solid var(--line); }
+  .dots { display:flex; gap:7px; flex:none; }
+  .dot { width:12px; height:12px; border-radius:50%; }
+  .dot.r{background:#ff5f57} .dot.y{background:#febc2e} .dot.g{background:#28c840}
+  .urlbar {
+    flex:1; display:flex; align-items:center; gap:8px; min-width:0;
+    height:30px; padding:0 13px; border-radius:999px;
+    background:var(--panel); border:1px solid var(--line);
+    font-size:12px; color:var(--muted);
+  }
+  .urlbar .lock { color:#15803d; font-size:11px; flex:none; }
+  .urlbar .u { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .urlbar .u b { color:var(--fg); font-weight:650; }
+  .stage-act { display:flex; gap:8px; flex:none; }
+  iframe { width:100%; height:74vh; border:0; background:#fff; display:block; }
+  .ghostbtn.rt-btn { color:#fff; background:linear-gradient(135deg,var(--accent),var(--accent2)); border-color:transparent; }
+  .ghostbtn.rt-btn:hover { filter:brightness(1.06); color:#fff; background:linear-gradient(135deg,var(--accent),var(--accent2)); }
+  #editorWrap { background:#fff; }
+  .edit-hint { padding:10px 16px; font-size:12px; color:var(--muted); background:var(--accentSoft);
+    border-bottom:1px solid var(--line2); }
+  .edit-hint b { color:var(--accent); }
+  #editor { height:70vh; overflow:auto; padding:24px 28px; outline:0; font-size:14px; line-height:1.7;
+    color:var(--fg); background:#fff; }
+  #editor table { border-collapse:collapse; margin:8px 0; }
+  #editor td, #editor th { border:1px solid #d6d9dd; padding:4px 8px; }
+  #editor [data-frozen], #editor [data-frozen-run] { background:#eef0ff; color:#5b6cff; border-radius:4px; padding:0 4px; }
+  #editor section { border:1px dashed #d6d9dd; border-radius:8px; padding:12px 14px; margin:0 0 14px; }
+
+  code { background:var(--panel); padding:2px 7px; border-radius:6px; border:1px solid var(--line); color:var(--muted); }
+
+  /* ───── Full-page drag veil ───── */
+  .veil {
+    position:fixed; inset:0; z-index:50; display:none; place-items:center;
+    background:rgba(91,108,255,.10); backdrop-filter:blur(2px);
+  }
+  .veil.on { display:grid; }
+  .veil-card {
+    padding:34px 46px; border-radius:18px; border:2px dashed var(--accent);
+    background:rgba(255,255,255,.92); box-shadow:var(--shadow-lg);
+    font-size:16px; font-weight:700; color:var(--accent); display:flex; align-items:center; gap:12px;
+  }
+  .veil-card .vi { font-size:26px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">d</div>
+    <h1>docloom</h1>
+  </header>
+
+  <!-- IDLE: big drop zone -->
+  <div class="drop" id="drop">
+    <div class="ico">📄</div>
+    <h2>문서를 여기로 드래그하세요</h2>
+    <div class="sub">또는 <span class="browse">클릭해서 선택</span> · .docx / .pptx / .xlsx / .csv / .pdf / .hwpx / .html / .md / .txt</div>
+    <div class="secure">🔒 <b>100% 브라우저 내 처리</b> — 파일이 서버로 업로드되지 않습니다.</div>
+    <div class="err" id="dropErr"></div>
+  </div>
+
+  <!-- ACTIVE: file strip + browser preview -->
+  <div class="workspace" id="workspace">
+    <div class="filebar">
+      <span id="badge" class="badge q">?</span>
+      <span class="fname" id="fname"></span>
+      <span class="msg" id="msg"></span>
+      <span class="grow"></span>
+      <button class="ghostbtn" id="changeBtn" title="다른 파일 열기">↻ 다른 파일</button>
+    </div>
+    <div class="stage-bar">
+      <div class="dots">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      </div>
+      <div class="urlbar">
+        <span class="lock">🔒</span>
+        <span class="u" id="urlText"><b>docloom</b> · 미리보기</span>
+      </div>
+      <div class="stage-act">
+        <button class="ghostbtn" id="editBtn" title="HTML 로 편집 후 원본 포맷으로 복원" style="display:none">✏️ 편집 &amp; 복원</button>
+        <button class="ghostbtn" id="previewBtn" title="미리보기로 돌아가기" style="display:none">← 미리보기</button>
+        <button class="ghostbtn rt-btn" id="restoreBtn" title="편집 내용을 원본 확장자로 복원·다운로드" style="display:none">⬇ 복원 다운로드</button>
+        <button class="ghostbtn rt-btn" id="savePdfBtn" title="미리보기에서 수정한 글자를 새 PDF로 저장" style="display:none">⬇ PDF로 저장</button>
+        <button class="ghostbtn" id="newtab" title="새 탭에서 열기">⤢ 새 탭</button>
+      </div>
+    </div>
+    <iframe id="frame" sandbox="allow-scripts allow-same-origin"></iframe>
+    <!-- 편집 모드: encode 로 뽑은 편집용 HTML 을 직접 고치고 decode 로 원본 포맷 복원 -->
+    <div id="editorWrap" style="display:none">
+      <div class="edit-hint">아래 내용을 직접 수정한 뒤 <b>복원 다운로드</b>를 누르면 원본 확장자·양식을 유지한 채 저장됩니다. (LLM 자리에 사람이 편집하는 것과 동일)</div>
+      <div id="editor" contenteditable="true" spellcheck="false"></div>
+    </div>
+  </div>
+
+  <input type="file" id="file" accept=".docx,.doc,.pptx,.ppt,.xlsx,.xls,.csv,.pdf,.hwpx,.hwp,.html,.htm,.md,.markdown,.txt" />
+</div>
+
+<!-- Full-page drag veil -->
+<div class="veil" id="veil">
+  <div class="veil-card"><span class="vi">📄</span> 여기에 놓으면 미리보기</div>
+</div>
+
+<script type="module">
+  // ?v= 캐시버스터 — 번들 재빌드 후 브라우저가 옛 파일을 안 쓰도록(하드리로드 불필요).
+  import { previewHtml, adapterFor, encode, decode, editablePreviewHtml, formatFromFilename,
+           extractPdfModel, pdfModelToPreviewHtml, buildPdfFromModel,
+           hwpToEditableHtml, applyHwpEdits, hwpToRichPreviewHtml } from "./docloom.mjs?v=20260601x-hwpdatadriven";
+  // 한글(.hwp/.hwpx) 충실 렌더 — rhwp(Rust+WASM) 의 Canvas 렌더러(주 경로) 사용.
+  import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260601";
+
+  let rhwpReady = null;
+  function ensureRhwp() {
+    if (!rhwpReady) {
+      // WASM 내부 텍스트 레이아웃 계산에 필요한 폭 측정 콜백(브라우저 canvas).
+      let ctx = null, lastFont = "";
+      globalThis.measureTextWidth = (font, text) => {
+        if (!ctx) ctx = document.createElement("canvas").getContext("2d");
+        if (font !== lastFont) { ctx.font = font; lastFont = font; }
+        return ctx.measureText(text || "").width;
+      };
+      rhwpReady = rhwpInit({ module_or_path: "./rhwp_bg.wasm?v=20260601" });
+    }
+    return rhwpReady;
+  }
+  // 한글 바이트 → 미리보기 HTML(드래그·선택·편집 가능한 진짜 HTML).
+  // rhwp 의 정확한 데이터(표 병합셀/셀배경/글자/이미지크기)+실제 페이지번호로 종이 페이지를
+  // 나눠 렌더. 절대좌표 픽셀일치는 아니지만 표 구조·이미지·페이지가 맞고 텍스트 선택이 된다.
+  async function renderHangul(bytes, name) {
+    await ensureRhwp();
+    const doc = new HwpDocument(bytes);
+    return hwpToRichPreviewHtml(doc, { title: name });
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const drop = $("drop"), dropErr = $("dropErr"), fileInput = $("file"),
+        workspace = $("workspace"), badge = $("badge"), fname = $("fname"), msg = $("msg"),
+        changeBtn = $("changeBtn"), urlText = $("urlText"), frame = $("frame"),
+        newtab = $("newtab"), veil = $("veil"),
+        editBtn = $("editBtn"), previewBtn = $("previewBtn"), restoreBtn = $("restoreBtn"),
+        savePdfBtn = $("savePdfBtn"),
+        editorWrap = $("editorWrap"), editor = $("editor");
+
+  let lastHtml = null;
+  let lastFrameUrl = null;  // 한글 Blob URL(누수 방지용 추적)
+  // 편집/복원용 현재 파일 상태
+  let curBytes = null, curName = "", curFmt = "?", curManifest = null, canRoundtrip = false;
+  let pdfModel = null;  // PDF 편집 모델(미리보기 글자 수정 → 새 PDF)
+  let directEdit = null; // docx·csv: 미리보기에서 바로 편집({manifest,format})
+  let curHwpDoc = null;  // 한글(.hwp/.hwpx): rhwp HwpDocument 편집 인스턴스(표 셀까지 편집)
+
+  function showPreviewMode() {
+    frame.style.display = "block";
+    editorWrap.style.display = "none";
+    previewBtn.style.display = "none";
+    // 직접편집(docx·csv)은 미리보기 자체가 편집화면 → 편집 토글 숨기고 저장만 노출.
+    restoreBtn.style.display = directEdit ? "inline-flex" : "none";
+    editBtn.style.display = (canRoundtrip && !directEdit) ? "inline-flex" : "none";
+    savePdfBtn.style.display = pdfModel ? "inline-flex" : "none";
+  }
+
+  function setBadge(fmt) {
+    badge.className = "badge " + (["docx","pptx","xlsx","doc","ppt","xls","csv","pdf","hwpx","hwp","html","md","txt"].includes(fmt) ? fmt : "q");
+    badge.textContent = fmt ?? "?";
+  }
+
+  async function handleFile(file) {
+    if (!file) return;
+    // idle → active 전환
+    drop.style.display = "none";
+    dropErr.style.display = "none";
+    workspace.style.display = "block";
+    fname.textContent = file.name;
+    setBadge("?");
+    msg.className = "msg";
+    msg.innerHTML = '<span class="spinner"></span>';
+    urlText.innerHTML = `<b>docloom</b> · ${file.name}`;
+    // 스피너가 먼저 그려지도록 다음 프레임에 무거운 처리
+    await new Promise((r) => setTimeout(r, 16));
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let fmt = "?";
+      canRoundtrip = false;
+      // 확장자 힌트 — 평문(csv/html/md/txt)은 매직으로 구분되지 않아 확장자로 정확히 라우팅.
+      const hint = formatFromFilename(file.name);
+      try { const ad = adapterFor(bytes, hint); fmt = ad.id; canRoundtrip = !!ad.supportsRoundTrip; } catch {}
+      // 한글=rhwp 충실렌더, PDF=글자 편집가능 미리보기, docx·csv=미리보기에서 바로 편집,
+      // 나머지=docloom 미리보기(+편집&복원 토글).
+      const isHangul = (fmt === "hwp" || fmt === "hwpx");
+      const isPdf = (fmt === "pdf");
+      const isDirectEdit = (fmt === "csv"); // office/docx 는 리치 미리보기 유지(직접편집은 형식 단순화→되돌림)
+      pdfModel = null; directEdit = null;
+      let html;
+      if (isPdf) {
+        // PDF: 추출 모델을 편집가능(글자 contenteditable) 미리보기로. 모델을 보관해 저장 시 재생성.
+        pdfModel = extractPdfModel(bytes, { maxPages: 60 });
+        html = pdfModelToPreviewHtml(pdfModel, { title: file.name, editable: true });
+      } else if (isDirectEdit) {
+        // docx·csv: 편집채널을 미리보기 스타일+contenteditable 로 → 그 화면에서 바로 수정.
+        const ep = editablePreviewHtml(bytes, { title: file.name });
+        directEdit = { manifest: ep.manifest, format: ep.format };
+        html = ep.html;
+      } else if (isHangul) {
+        html = await renderHangul(bytes, file.name);
+      } else {
+        html = previewHtml(bytes, { title: file.name, format: hint });
+      }
+      lastHtml = html;
+      // 한글·PDF·직접편집은 내용이 커질 수 있어 srcdoc 대신 Blob URL(잘림 방지). 모두 same-origin 이라
+      // 부모가 iframe 의 편집된 글자(contenteditable)를 읽을 수 있다.
+      if (lastFrameUrl) { URL.revokeObjectURL(lastFrameUrl); lastFrameUrl = null; }
+      if (isHangul || isPdf || isDirectEdit) {
+        frame.removeAttribute("srcdoc");
+        lastFrameUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+        frame.src = lastFrameUrl;
+      } else {
+        frame.removeAttribute("src");
+        frame.srcdoc = html;
+      }
+      // 편집/복원 상태 저장
+      curBytes = bytes; curName = file.name; curFmt = fmt; curManifest = null; curHwpDoc = null;
+      setBadge(fmt);
+      showPreviewMode();
+      msg.className = "msg ok";
+      msg.innerHTML = isPdf ? "✓ 렌더 완료 · 글자를 클릭해 수정 후 <b>PDF로 저장</b>"
+        : isDirectEdit ? "✓ 렌더 완료 · 글자를 클릭해 바로 수정 후 <b>복원 다운로드</b>"
+        : canRoundtrip ? "✓ 렌더 완료 · <b>편집 &amp; 복원</b> 가능" : "✓ 렌더 완료 · 미리보기 전용";
+    } catch (e) {
+      // 에러 → idle 로 복귀하고 메시지 노출
+      lastHtml = null;
+      workspace.style.display = "none";
+      drop.style.display = "block";
+      dropErr.style.display = "block";
+      dropErr.textContent = "✗ " + (e?.message ?? e);
+    }
+  }
+
+  // 파일 선택
+  drop.addEventListener("click", () => fileInput.click());
+  changeBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) handleFile(fileInput.files[0]);
+    fileInput.value = "";  // 같은 파일 다시 선택 가능
+  });
+
+  // 새 탭에서 미리보기 열기
+  newtab.addEventListener("click", () => {
+    if (!lastHtml) return;
+    const blob = new Blob([lastHtml], { type:"text/html" });
+    window.open(URL.createObjectURL(blob), "_blank");
+  });
+
+  // 편집 모드: 문서 → 편집용 HTML(encode) 을 직접 고치고 → 원본 포맷(decode) 복원
+  editBtn.addEventListener("click", async () => {
+    if (!curBytes) return;
+    try {
+      if (curFmt === "hwp" || curFmt === "hwpx") {
+        // 한글: rhwp 로 표 셀까지 펼친 편집 HTML. (.hwp 도 복원은 .hwpx 로 — exportHwp 불안정)
+        await ensureRhwp();
+        curHwpDoc = new HwpDocument(curBytes);
+        editor.innerHTML = hwpToEditableHtml(curHwpDoc);
+      } else {
+        const { html, manifest } = encode(curBytes, { format: curFmt });
+        curManifest = manifest; curHwpDoc = null;
+        editor.innerHTML = html;          // 편집용 HTML 그대로 (data-* 식별자 포함)
+      }
+      frame.style.display = "none";
+      editorWrap.style.display = "block";
+      editBtn.style.display = "none";
+      previewBtn.style.display = "inline-flex";
+      restoreBtn.style.display = "inline-flex";
+      urlText.innerHTML = `<b>편집</b> · ${curName}`;
+    } catch (e) {
+      msg.className = "msg err"; msg.textContent = "✗ 편집 변환 실패: " + (e?.message ?? e);
+    }
+  });
+
+  // 미리보기로 복귀
+  previewBtn.addEventListener("click", () => {
+    showPreviewMode();
+    urlText.innerHTML = `<b>docloom</b> · ${curName}`;
+  });
+
+  // 복원: 편집된 HTML + manifest → 원본 확장자 바이트 다운로드.
+  // 직접편집(docx·csv)이면 iframe 의 #dl-edit, 아니면 편집기 박스에서 읽는다.
+  restoreBtn.addEventListener("click", () => {
+    // 한글: rhwp 문서에 편집 반영 → exportHwpx 로 .hwpx 다운로드(.hwp 입력이어도 .hwpx 출력)
+    if (curHwpDoc) {
+      try {
+        const n = applyHwpEdits(curHwpDoc, editor.innerHTML);
+        const out = curHwpDoc.exportHwpx();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
+        a.download = curName.replace(/\.(hwp|hwpx)$/i, "") + ".hwpx";
+        a.click();
+        URL.revokeObjectURL(a.href);
+        msg.className = "msg ok"; msg.textContent = `✓ 복원 완료 — ${n}곳 반영, .hwpx 다운로드`;
+      } catch (e) {
+        msg.className = "msg err"; msg.textContent = "✗ 복원 실패: " + (e?.message ?? e);
+      }
+      return;
+    }
+    let editedHtml, manifest, format;
+    if (directEdit) {
+      const el = frame.contentDocument && frame.contentDocument.getElementById("dl-edit");
+      if (!el) { msg.className = "msg err"; msg.textContent = "✗ 편집 영역을 찾지 못했습니다"; return; }
+      editedHtml = el.innerHTML; manifest = directEdit.manifest; format = directEdit.format;
+    } else {
+      if (!curManifest) return;
+      editedHtml = editor.innerHTML; manifest = curManifest; format = curFmt;
+    }
+    try {
+      const out = decode(editedHtml, manifest, { format });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
+      a.download = curName.replace(/(\.[^.]+)?$/, (m) => m || "." + format);
+      a.click();
+      URL.revokeObjectURL(a.href);
+      msg.className = "msg ok"; msg.textContent = "✓ 복원 완료 — 다운로드됨";
+    } catch (e) {
+      msg.className = "msg err"; msg.textContent = "✗ 복원 실패: " + (e?.message ?? e);
+    }
+  });
+
+  // PDF 저장: iframe 안에서 수정한 글자(contenteditable span)를 모델에 반영 → 새 PDF 생성·다운로드
+  savePdfBtn.addEventListener("click", () => {
+    if (!pdfModel) return;
+    try {
+      const idoc = frame.contentDocument;
+      if (idoc) {
+        for (const sp of idoc.querySelectorAll('.pdf-t[data-pi]')) {
+          const pi = +sp.getAttribute("data-pi"), ii = +sp.getAttribute("data-ii");
+          const page = pdfModel.pages[pi];
+          if (page && page.items[ii]) page.items[ii].text = sp.textContent ?? "";
+        }
+      }
+      const out = buildPdfFromModel(pdfModel);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([out], { type: "application/pdf" }));
+      a.download = curName.replace(/(\.pdf)?$/i, "") + "_edited.pdf";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      msg.className = "msg ok"; msg.textContent = "✓ 새 PDF 저장 완료 — 다운로드됨";
+    } catch (e) {
+      msg.className = "msg err"; msg.textContent = "✗ PDF 생성 실패: " + (e?.message ?? e);
+    }
+  });
+
+  // 화면 어디에 드래그해도 받기 (전체 페이지 드롭)
+  let dragDepth = 0;
+  window.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    if (dragDepth++ === 0) veil.classList.add("on");
+  });
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    if (--dragDepth <= 0) { dragDepth = 0; veil.classList.remove("on"); }
+  });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragDepth = 0; veil.classList.remove("on");
+    handleFile(e.dataTransfer.files?.[0]);
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# 빌드/디버그 산출물
+_shapes.mjs
+
+# 데모 번들 + rhwp 런타임 복사본 (npm run demo:build 로 생성)
+demo/docloom.mjs
+demo/rhwp.js
+demo/rhwp_bg.wasm
+
+# 테스트 픽스처: 합성 sample.docx 만 포함, 실문서(.doc/.hwp/.hwpx)는 제외
+test/fixtures/*.html
+test/fixtures/sample.doc
+test/fixtures/sample.hwp
+test/fixtures/sample.hwpx
