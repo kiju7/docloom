@@ -320,6 +320,19 @@ const MIME: Record<string, string> = {
   tif: "image/tiff",
   tiff: "image/tiff",
 };
+/** 알려진 이미지 시그니처면 true(PNG/JPEG/GIF/BMP/TIFF). 압축여부 판별용. */
+function looksLikeImage(b: Uint8Array): boolean {
+  if (b.length < 4) return false;
+  return (
+    (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) || // PNG
+    (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) || // JPEG
+    (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) || // GIF
+    (b[0] === 0x42 && b[1] === 0x4d) || // BMP
+    (b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a) || // TIFF LE
+    (b[0] === 0x4d && b[1] === 0x4d && b[2] === 0x00) // TIFF BE
+  );
+}
+
 function collectImages(streams: Record<string, Uint8Array>): string[] {
   return Object.keys(streams)
     .filter((p) => /^BinData\/BIN[0-9A-Fa-f]+\.\w+$/.test(p))
@@ -327,9 +340,26 @@ function collectImages(streams: Record<string, Uint8Array>): string[] {
     .map((p) => {
       const ext = p.split(".").pop()?.toLowerCase() ?? "";
       const mime = MIME[ext];
-      return mime ? `data:${mime};base64,${bytesToBase64(streams[p]!)}` : "";
+      if (!mime) return "";
+      // BinData 는 문서 압축설정에 따라 raw-deflate 압축돼 있을 수 있다(이미지 시그니처가
+      // 없으면 압축으로 보고 inflate). 이미 비압축(시그니처 있음)이면 그대로 쓴다.
+      let bytes = streams[p]!;
+      if (!looksLikeImage(bytes)) {
+        const inflated = safeInflate(bytes);
+        if (inflated && looksLikeImage(inflated)) bytes = inflated;
+      }
+      return `data:${mime};base64,${bytesToBase64(bytes)}`;
     })
     .filter(Boolean);
+}
+
+/** raw-deflate inflate 시도(실패 시 null). */
+function safeInflate(b: Uint8Array): Uint8Array | null {
+  try {
+    return hwpInflate(b);
+  } catch {
+    return null;
+  }
 }
 
 /**

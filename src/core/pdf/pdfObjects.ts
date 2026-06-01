@@ -348,6 +348,7 @@ export class PdfDocument {
       lengthBits: this.numOf(this.get(enc, "Length"), 40),
       O: str(this.get(enc, "O")),
       U: str(this.get(enc, "U")),
+      UE: str(this.get(enc, "UE")),
       P: this.numOf(this.get(enc, "P"), 0),
       id0,
       encryptMetadata: emObj === false ? false : true,

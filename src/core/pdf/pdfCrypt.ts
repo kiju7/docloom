@@ -6,9 +6,10 @@
  * MD5 + RC4 를 자체구현해 표준 보안 핸들러(Algorithm 2/4/5)로 파일키를 유도하고,
  * 객체별 키로 스트림/문자열을 복호한다.
  *
- * 지원: V1/V2, R2/R3 (RC4 40~128bit). 미지원: V4/V5(AESV2/AESV3) → 호출측이 감지해 안내.
+ * 지원: V1/V2(RC4 40~128bit), V4(AESV2/RC4), V5·R5/R6(AESV3, AES-256). 빈 사용자 암호 한정.
  * (보안 노트: 이는 DRM 우회가 아니라 "빈 암호로 열리는" 합법 문서를 읽기 위함이다.)
  */
+import { aesCbcDecrypt, sha256, hash2B } from "./pdfAes.js";
 
 const PAD = new Uint8Array([
   0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,
@@ -111,6 +112,8 @@ export interface CryptParams {
   lengthBits: number;
   O: Uint8Array;
   U: Uint8Array;
+  /** V5(AESV3) 파일키 복호용 — 사용자 암호로 감싼 키. */
+  UE?: Uint8Array;
   P: number;
   id0: Uint8Array;
   encryptMetadata: boolean;
@@ -118,19 +121,27 @@ export interface CryptParams {
   cfm: string;
 }
 
-/** RC4 표준 보안 핸들러 — 빈 사용자 암호로 파일키를 유도. AES 는 미지원(active=false). */
+const SALT_AES = new Uint8Array([0x73, 0x41, 0x6c, 0x54]); // "sAlT"
+
+/**
+ * 표준 보안 핸들러(빈 사용자 암호). RC4(V1/2) + AESV2(V4) + AESV3(V5/R5·R6) 복호.
+ * 빈 암호로 안 열리는(진짜 암호 보호) 문서는 unsupported 로 표시한다.
+ */
 export class PdfCrypt {
   active = false;
-  unsupported = false; // AES 등 미지원 암호
+  unsupported = false;
   private keyLen: number;
-  private fileKey = new Uint8Array(16);
+  private fileKey = new Uint8Array(32);
+  private mode: "rc4" | "aes128" | "aes256";
 
   constructor(private p: CryptParams) {
-    if (p.cfm === "AESV2" || p.cfm === "AESV3" || p.V >= 5) {
-      this.unsupported = true;
-      this.keyLen = 16;
-      return;
+    if (p.V >= 5 || p.cfm === "AESV3") {
+      this.mode = "aes256"; this.keyLen = 32; this.deriveKeyV5(); return;
     }
+    if (p.cfm === "AESV2") {
+      this.mode = "aes128"; this.keyLen = 16; this.deriveKey(); return;
+    }
+    this.mode = "rc4";
     let kl = Math.floor((p.lengthBits || 40) / 8);
     if (kl > 16) kl = 16;
     if (kl < 5) kl = 5;
@@ -138,7 +149,7 @@ export class PdfCrypt {
     this.deriveKey();
   }
 
-  /** Algorithm 2: MD5(pad || O || P(LE4) || ID0 [|| 0xFFFFFFFF]) → R>=3 이면 50회 더. */
+  /** Algorithm 2 (RC4·AESV2): MD5(pad || O || P(LE4) || ID0 [|| 0xFFFFFFFF]) → R>=3 이면 50회 더. */
   private deriveKey(): void {
     const pLE = new Uint8Array([this.p.P & 0xff, (this.p.P >>> 8) & 0xff, (this.p.P >>> 16) & 0xff, (this.p.P >>> 24) & 0xff]);
     let input = concat(PAD, this.p.O, pLE, this.p.id0);
@@ -149,17 +160,38 @@ export class PdfCrypt {
     this.active = true;
   }
 
-  /** 객체별 키: MD5(fileKey || objNum(LE3) || gen(LE2))[:keyLen+5]. */
-  private objectKey(num: number, gen: number): Uint8Array {
+  /** Algorithm 2.A/2.B (AESV3): 빈 사용자 암호 검증 후 UE 를 풀어 32바이트 파일키 획득. */
+  private deriveKeyV5(): void {
+    const U = this.p.U, UE = this.p.UE;
+    if (!U || U.length < 48 || !UE || UE.length < 32) { this.unsupported = true; return; }
+    const pw = new Uint8Array(0), empty = new Uint8Array(0);
+    const valSalt = U.subarray(32, 40), keySalt = U.subarray(40, 48);
+    const r6 = this.p.R >= 6;
+    const hash = (salt: Uint8Array): Uint8Array => (r6 ? hash2B(pw, salt, empty) : sha256(concat(pw, salt)));
+    // 빈 사용자 암호 검증: hash(pw, validationSalt) == U[0:32] 이어야 빈 암호로 열린다.
+    const v = hash(valSalt);
+    for (let i = 0; i < 32; i++) if (v[i] !== U[i]) { this.unsupported = true; return; }
+    // 파일키 = AES-256-CBC(IV=0, no-pad) 로 UE 를 푼다(중간키 = hash(pw, keySalt)).
+    const ikey = hash(keySalt);
+    const fk = aesCbcDecrypt(ikey, UE.subarray(0, 32), { iv: new Uint8Array(16) });
+    this.fileKey.set(fk.subarray(0, 32));
+    this.active = true;
+  }
+
+  /** 객체별 키(RC4·AESV2): MD5(fileKey || objNum(LE3) || gen(LE2) [|| sAlT])[:keyLen+5]. */
+  private objectKey(num: number, gen: number, aes: boolean): Uint8Array {
     const extra = new Uint8Array([num & 0xff, (num >>> 8) & 0xff, (num >>> 16) & 0xff, gen & 0xff, (gen >>> 8) & 0xff]);
-    const hash = md5(concat(this.fileKey.subarray(0, this.keyLen), extra));
-    const eff = Math.min(this.keyLen + 5, 16);
-    return hash.subarray(0, eff);
+    const parts = [this.fileKey.subarray(0, this.keyLen), extra];
+    if (aes) parts.push(SALT_AES);
+    const hash = md5(concat(...parts));
+    return hash.subarray(0, Math.min(this.keyLen + 5, 16));
   }
 
   /** 객체 num/gen 의 데이터(스트림/문자열) 복호. */
   decrypt(data: Uint8Array, num: number, gen: number): Uint8Array {
     if (!this.active || data.length === 0) return data;
-    return rc4(this.objectKey(num, gen), data);
+    if (this.mode === "rc4") return rc4(this.objectKey(num, gen, false), data);
+    if (this.mode === "aes128") return aesCbcDecrypt(this.objectKey(num, gen, true), data, { removePadding: true });
+    return aesCbcDecrypt(this.fileKey.subarray(0, 32), data, { removePadding: true }); // aes256: 파일키 직접
   }
 }

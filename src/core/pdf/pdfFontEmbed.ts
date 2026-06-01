@@ -232,11 +232,18 @@ function buildCodeToGid(
   doc: PdfDocument, raw: Uint8Array, kind: "tt" | "ff3", isType0: boolean, descendant: PDict | undefined, fm: FontMapInfo,
 ): Map<number, number> | null {
   if (isType0) {
-    // CID 폰트: 코드=CID(Identity-H/V 가정), gid 는 CIDToGIDMap. 등장 코드는 ToUnicode·W 키에서.
-    const c2gid = cidToGidResolver(doc, descendant);
+    // CID 폰트: 코드=CID(Identity-H/V 가정). gid 는 CIDFontType2=CIDToGIDMap, CIDFontType0(bare CFF)=CFF charset.
+    let resolve: (cid: number) => number;
+    if (kind === "ff3" && !readTables(raw)) {
+      const inv = cffCidToGid(raw);
+      if (!inv) return null;
+      resolve = (cid) => inv.get(cid) ?? 0;
+    } else {
+      resolve = cidToGidResolver(doc, descendant);
+    }
     const codes = new Set<number>([...(fm.toUnicode?.keys() ?? []), ...fm.widths.keys()]);
     const m = new Map<number, number>();
-    for (const code of codes) m.set(code, c2gid(code));
+    for (const code of codes) m.set(code, resolve(code));
     return m.size ? m : null;
   }
   if (kind === "tt" || readTables(raw)) {
@@ -304,17 +311,200 @@ export function embedFontFace(doc: PdfDocument, fontDict: PDict, fm: FontMapInfo
   return family;
 }
 
-// ── bare CFF(FontFile3 Type1C/CIDFontType0C) 처리 ────────────────────────────
-// 임시 스텁(Task 4 에서 구현). 현재는 bare CFF 를 임베드 안 하고 대체폰트로 폴백한다.
+// ── bare CFF(FontFile3 Type1C/CIDFontType0C) → OTF 래핑 ──────────────────────
+// 브라우저는 bare CFF 를 못 읽으므로 'OTTO' sfnt 로 감싸고(필수 테이블 합성) (3,1) cmap 을 단다.
 
-/** 단순 bare CFF 의 코드→GID(인코딩). 미구현 → null(폴백). */
-function parseCFFEncoding(_cff: Uint8Array): Map<number, number> | null {
-  return null;
+interface CFFInfo { numGlyphs: number; unitsPerEm: number; isCID: boolean; charsetOff: number; encodingOff: number; }
+
+/** CFF INDEX(count+offSize+offsets+data) → 항목 [start,end] 배열과 다음 위치. */
+function readCFFIndex(b: Uint8Array, pos: number): { items: [number, number][]; end: number } {
+  if (pos + 2 > b.length) return { items: [], end: pos };
+  const count = (b[pos]! << 8) | b[pos + 1]!; pos += 2;
+  if (count === 0) return { items: [], end: pos };
+  const offSize = b[pos++]!;
+  const readOff = (i: number): number => { let v = 0; for (let k = 0; k < offSize; k++) v = (v << 8) | b[pos + i * offSize + k]!; return v; };
+  const offBase = pos + (count + 1) * offSize - 1;
+  const items: [number, number][] = [];
+  for (let i = 0; i < count; i++) items.push([offBase + readOff(i), offBase + readOff(i + 1)]);
+  return { items, end: offBase + readOff(count) };
 }
 
-/** bare CFF → OTF(sfnt) 래핑 후 (3,1) cmap 주입. 미구현 → null(폴백). */
-function wrapCFFtoOTF(_cff: Uint8Array, _uToG: Map<number, number>, _c2g: Map<number, number>, _fm: FontMapInfo): Uint8Array | null {
-  return null;
+/** CFF DICT → operator(12·xx 는 1200+xx) → operand[]. */
+function parseCFFDict(b: Uint8Array, start: number, end: number): Map<number, number[]> {
+  const d = new Map<number, number[]>();
+  let ops: number[] = [];
+  let i = start;
+  while (i < end) {
+    const b0 = b[i]!;
+    if (b0 <= 21) {
+      let op = b0; i++;
+      if (b0 === 12) { op = 1200 + b[i]!; i++; }
+      d.set(op, ops); ops = [];
+    } else if (b0 === 28) { ops.push((((b[i + 1]! << 8) | b[i + 2]!) << 16) >> 16); i += 3; }
+    else if (b0 === 29) { ops.push((b[i + 1]! << 24) | (b[i + 2]! << 16) | (b[i + 3]! << 8) | b[i + 4]!); i += 5; }
+    else if (b0 === 30) { // real
+      i++; let s = ""; let done = false;
+      while (i < end && !done) {
+        const byte = b[i++]!;
+        for (const nib of [byte >> 4, byte & 15]) {
+          if (nib <= 9) s += nib; else if (nib === 0xa) s += "."; else if (nib === 0xb) s += "E";
+          else if (nib === 0xc) s += "E-"; else if (nib === 0xe) s += "-"; else if (nib === 0xf) { done = true; break; }
+        }
+      }
+      ops.push(parseFloat(s) || 0);
+    }
+    else if (b0 >= 32 && b0 <= 246) { ops.push(b0 - 139); i++; }
+    else if (b0 >= 247 && b0 <= 250) { ops.push((b0 - 247) * 256 + b[i + 1]! + 108); i += 2; }
+    else if (b0 >= 251 && b0 <= 254) { ops.push(-(b0 - 251) * 256 - b[i + 1]! - 108); i += 2; }
+    else i++;
+  }
+  return d;
+}
+
+/** bare CFF 의 Top DICT 핵심값. 파싱 실패면 null. */
+function parseCFFTop(b: Uint8Array): CFFInfo | null {
+  if (b.length < 4 || b[0] !== 1) return null; // major version 1
+  const hdrSize = b[2]!;
+  let pos = hdrSize;
+  pos = readCFFIndex(b, pos).end;          // Name INDEX
+  const topIdx = readCFFIndex(b, pos);     // Top DICT INDEX
+  if (!topIdx.items.length) return null;
+  const [ts, te] = topIdx.items[0]!;
+  const dict = parseCFFDict(b, ts, te);
+  const charStringsOff = dict.get(17)?.[0] ?? 0;
+  if (!charStringsOff) return null;
+  const fm = dict.get(1207); // FontMatrix
+  const unitsPerEm = fm && fm[0] ? Math.round(1 / fm[0]) : 1000;
+  return {
+    numGlyphs: readCFFIndex(b, charStringsOff).items.length,
+    unitsPerEm: unitsPerEm || 1000,
+    isCID: dict.has(1230), // ROS
+    charsetOff: dict.get(15)?.[0] ?? 0,
+    encodingOff: dict.get(16)?.[0] ?? 0,
+  };
+}
+
+/** charset(format 0/1/2) → GID→SID/CID 배열(gid0=.notdef=0). 미리정의(0/1/2)면 null. */
+function parseCFFCharset(b: Uint8Array, off: number, numGlyphs: number): number[] | null {
+  if (off === 0 || off === 1 || off === 2) return null;
+  const sids = new Array<number>(numGlyphs).fill(0);
+  let pos = off; const fmt = b[pos++]!; let gid = 1;
+  if (fmt === 0) { while (gid < numGlyphs) { sids[gid++] = (b[pos]! << 8) | b[pos + 1]!; pos += 2; } }
+  else if (fmt === 1 || fmt === 2) {
+    while (gid < numGlyphs) {
+      const first = (b[pos]! << 8) | b[pos + 1]!; pos += 2;
+      const nLeft = fmt === 1 ? b[pos++]! : ((b[pos]! << 8) | b[pos + 1]!); if (fmt === 2) pos += 2;
+      for (let k = 0; k <= nLeft && gid < numGlyphs; k++) sids[gid++] = first + k;
+    }
+  } else return null;
+  return sids;
+}
+
+/** CID-keyed CFF → CID→GID(charset 역매핑). 비CID면 null. */
+function cffCidToGid(b: Uint8Array): Map<number, number> | null {
+  const info = parseCFFTop(b);
+  if (!info || !info.isCID) return null;
+  const g2c = parseCFFCharset(b, info.charsetOff, info.numGlyphs);
+  const m = new Map<number, number>();
+  if (g2c) { for (let gid = 0; gid < g2c.length; gid++) m.set(g2c[gid]!, gid); m.set(0, 0); }
+  else for (let gid = 0; gid < info.numGlyphs; gid++) m.set(gid, gid); // identity charset
+  return m;
+}
+
+/** 단순 bare CFF 의 Encoding(format 0/1) → 코드→GID. 미리정의/CID면 null(폴백). */
+function parseCFFEncoding(b: Uint8Array): Map<number, number> | null {
+  const info = parseCFFTop(b);
+  if (!info || info.isCID) return null;
+  const off = info.encodingOff;
+  if (off === 0 || off === 1) return null; // Standard/Expert 미리정의 → 폴백
+  const m = new Map<number, number>();
+  let pos = off; const fmt = b[pos++]! & 0x7f;
+  if (fmt === 0) { const n = b[pos++]!; for (let i = 1; i <= n; i++) m.set(b[pos++]!, i); }
+  else if (fmt === 1) { const nR = b[pos++]!; let gid = 1; for (let r = 0; r < nR; r++) { const first = b[pos++]!, nLeft = b[pos++]!; for (let k = 0; k <= nLeft; k++) m.set(first + k, gid++); } }
+  else return null;
+  return m.size ? m : null;
+}
+
+// sfnt 필수 테이블 생성기 (CFF OTF 래핑용) ----------------------------------
+function makeHead(upm: number): Uint8Array {
+  const b = new Uint8Array(54); const d = new DataView(b.buffer);
+  d.setUint32(0, 0x00010000); d.setUint32(4, 0x00010000); /* 8: checkSumAdjustment 나중 */
+  d.setUint32(12, 0x5f0f3cf5); d.setUint16(16, 0x000b); d.setUint16(18, upm);
+  d.setInt16(36, 0); d.setInt16(38, -Math.round(upm * 0.2)); d.setInt16(40, upm); d.setInt16(42, Math.round(upm * 0.8));
+  d.setInt16(50, 0); d.setInt16(52, 0); d.setInt16(48, 2); d.setUint16(46, 8);
+  return b;
+}
+function makeMaxpCFF(numGlyphs: number): Uint8Array {
+  const b = new Uint8Array(6); const d = new DataView(b.buffer);
+  d.setUint32(0, 0x00005000); d.setUint16(4, numGlyphs); return b;
+}
+function makeHheaHmtx(adv: number[], upm: number): { hhea: Uint8Array; hmtx: Uint8Array } {
+  const n = adv.length; let maxAdv = 0; for (const a of adv) if (a > maxAdv) maxAdv = a;
+  const hhea = new Uint8Array(36); const d = new DataView(hhea.buffer);
+  d.setUint32(0, 0x00010000); d.setInt16(4, Math.round(upm * 0.8)); d.setInt16(6, -Math.round(upm * 0.2));
+  d.setInt16(8, 0); d.setUint16(10, maxAdv); d.setInt16(16, maxAdv); d.setInt16(18, 1); d.setUint16(34, n);
+  const hmtx = new Uint8Array(n * 4); const hd = new DataView(hmtx.buffer);
+  for (let i = 0; i < n; i++) hd.setUint16(i * 4, adv[i]! & 0xffff);
+  return { hhea, hmtx };
+}
+function makeOS2(upm: number): Uint8Array {
+  const b = new Uint8Array(96); const d = new DataView(b.buffer);
+  d.setUint16(0, 4); d.setInt16(2, Math.round(upm * 0.5)); d.setUint16(4, 400); d.setUint16(6, 5);
+  for (let i = 0; i < 4; i++) b[58 + i] = "DLfm".charCodeAt(i);
+  d.setUint16(62, 0x40); d.setUint16(64, 0x20); d.setUint16(66, 0xffff);
+  d.setInt16(68, Math.round(upm * 0.8)); d.setInt16(70, -Math.round(upm * 0.2)); d.setInt16(72, 0);
+  d.setUint16(74, Math.round(upm * 0.8)); d.setUint16(76, Math.round(upm * 0.2));
+  d.setUint32(78, 1); d.setInt16(86, Math.round(upm * 0.5)); d.setInt16(88, Math.round(upm * 0.7)); d.setUint16(92, 0x20);
+  return b;
+}
+function makePost(): Uint8Array { const b = new Uint8Array(32); new DataView(b.buffer).setUint32(0, 0x00030000); return b; }
+/** 최소 name 테이블 — 합성 family 이름(플랫폼 3,1 / Mac 0,0) 각 nameID 1·2·4·6. */
+function makeName(): Uint8Array {
+  const ids = [1, 2, 4, 6]; const valW = "DLFont", valSub = "Regular";
+  const recs: { p: number; e: number; l: number; id: number; s: Uint8Array }[] = [];
+  for (const id of ids) {
+    const text = id === 2 ? valSub : valW;
+    const utf16 = new Uint8Array(text.length * 2); for (let i = 0; i < text.length; i++) utf16[i * 2 + 1] = text.charCodeAt(i);
+    recs.push({ p: 3, e: 1, l: 0x409, id, s: utf16 });
+    const ascii = new Uint8Array(text.length); for (let i = 0; i < text.length; i++) ascii[i] = text.charCodeAt(i);
+    recs.push({ p: 1, e: 0, l: 0, id, s: ascii });
+  }
+  const count = recs.length, headerLen = 6 + count * 12;
+  let strLen = 0; for (const r of recs) strLen += r.s.length;
+  const b = new Uint8Array(headerLen + strLen); const d = new DataView(b.buffer);
+  d.setUint16(0, 0); d.setUint16(2, count); d.setUint16(4, headerLen);
+  let so = 0;
+  for (let i = 0; i < count; i++) {
+    const r = recs[i]!, o = 6 + i * 12;
+    d.setUint16(o, r.p); d.setUint16(o + 2, r.e); d.setUint16(o + 4, r.l); d.setUint16(o + 6, r.id);
+    d.setUint16(o + 8, r.s.length); d.setUint16(o + 10, so);
+    b.set(r.s, headerLen + so); so += r.s.length;
+  }
+  return b;
+}
+
+/** bare CFF → OTF(sfnt) 래핑 후 (3,1) cmap 주입. 폭은 PDF Widths 에서 hmtx 합성. */
+export function wrapCFFtoOTF(cff: Uint8Array, uToG: Map<number, number>, c2g: Map<number, number>, fm: FontMapInfo): Uint8Array | null {
+  const info = parseCFFTop(cff);
+  if (!info || !info.numGlyphs) return null;
+  const upm = info.unitsPerEm, n = info.numGlyphs;
+  // gid→advance(폰트단위): PDF Widths(1000단위 글리프공간)를 upm 으로 환산. 없으면 0.5em.
+  const adv = new Array<number>(n).fill(Math.round(upm * 0.5));
+  for (const [code, gid] of c2g) {
+    if (gid >= 0 && gid < n) { const w = fm.widths.get(code); if (w !== undefined) adv[gid] = Math.max(0, Math.round((w / 1000) * upm)); }
+  }
+  const { hhea, hmtx } = makeHheaHmtx(adv, upm);
+  return buildSfnt(0x4f54544f, [
+    { tag: "CFF ", data: cff },
+    { tag: "cmap", data: makeCmapFormat4(uToG) },
+    { tag: "head", data: makeHead(upm) },
+    { tag: "hhea", data: hhea },
+    { tag: "hmtx", data: hmtx },
+    { tag: "maxp", data: makeMaxpCFF(n) },
+    { tag: "name", data: makeName() },
+    { tag: "OS/2", data: makeOS2(upm) },
+    { tag: "post", data: makePost() },
+  ]);
 }
 
 /** Uint8Array → base64(브라우저 atob 호환). Node/브라우저 양쪽 동작. */
