@@ -17,8 +17,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "html": "tsx scripts/to-html.ts",
+    "hwp:verify": "tsx scripts/hwp-verify.ts",
+    "rhwp:vendor": "mkdir -p vendor/rhwp && cp \"${RHWP_SRC:-../rhwp}/pkg/rhwp.js\" \"${RHWP_SRC:-../rhwp}/pkg/rhwp_bg.wasm\" \"${RHWP_SRC:-../rhwp}/pkg/rhwp.d.ts\" \"${RHWP_SRC:-../rhwp}/pkg/rhwp_bg.wasm.d.ts\" vendor/rhwp/ && git -C \"${RHWP_SRC:-../rhwp}\" rev-parse HEAD > vendor/rhwp/RHWP_BUILD.txt && echo \"vendored rhwp $(cat vendor/rhwp/RHWP_BUILD.txt)\"",
     "serve": "node server.mjs",
-    "demo:rhwp": "cp node_modules/@rhwp/core/rhwp.js node_modules/@rhwp/core/rhwp_bg.wasm demo/",
+    "demo:rhwp": "cp vendor/rhwp/rhwp.js vendor/rhwp/rhwp_bg.wasm demo/",
     "demo:build": "esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=demo/docloom.mjs && npm run demo:rhwp",
     "demo": "npm run demo:build && echo '데모 준비 완료 → 브라우저에서 demo/index.html 열기 (또는: npx serve demo)'"
   },
@@ -41,6 +43,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "esbuild": "^0.21.5",
+    "puppeteer-core": "^23.11.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

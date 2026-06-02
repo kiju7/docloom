@@ -16,3 +16,7 @@ test/fixtures/*.html
 test/fixtures/sample.doc
 test/fixtures/sample.hwp
 test/fixtures/sample.hwpx
+
+# HWP 작업 산출물(개인 샘플 문서·검증 파생데이터)
+/demo/_samples/
+/scoreboards/

@@ -7,27 +7,20 @@ import {
   applyHwpEdits,
   hwpToRichPreviewHtml,
   hwpToHybridPreviewHtml,
-  type RhwpDoc,
 } from "../src/rhwp/hwpEdit.js";
+import { loadRhwp, rhwpDir, type HwpDocCtor } from "../scripts/rhwpNode.js";
 
 // rhwp WASM 을 Node 에서 초기화해 실제 HwpDocument 로 편집 채널을 검증한다.
+// 로더는 vendor/rhwp(소스 빌드) → node_modules/@rhwp/core(stock) 순으로 산출물을 찾는다.
 const here = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(here, "..");
-const WASM = join(ROOT, "node_modules", "@rhwp", "core", "rhwp_bg.wasm");
-const RHWP_JS = join(ROOT, "node_modules", "@rhwp", "core", "rhwp.js");
 const HWP = join(here, "fixtures", "sample.hwp");
-const ready = existsSync(WASM) && existsSync(RHWP_JS) && existsSync(HWP);
+const ready = rhwpDir() != null && existsSync(HWP);
 
-let HwpDocument: new (b: Uint8Array) => RhwpDoc & { exportHwpx(): Uint8Array; pageCount(): number };
+let HwpDocument: HwpDocCtor;
 
 beforeAll(async () => {
   if (!ready) return;
-  const rhwp = await import(RHWP_JS);
-  const mod = await WebAssembly.compile(readFileSync(WASM));
-  // 레이아웃 폭 측정 콜백(Node 엔 canvas 없음 → 근사 스텁; 텍스트 편집엔 영향 없음).
-  (globalThis as any).measureTextWidth = (_font: string, text: string) => (text ? text.length * 10 : 0);
-  await rhwp.default({ module_or_path: mod });
-  HwpDocument = rhwp.HwpDocument;
+  HwpDocument = (await loadRhwp())!;
 });
 
 describe.runIf(ready)("rhwp 기반 HWP 편집 채널 (표 셀 포함)", () => {

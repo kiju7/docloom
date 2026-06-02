@@ -261,9 +261,9 @@
   import { previewHtml, adapterFor, encode, decode, editablePreviewHtml, formatFromFilename,
            extractPdfModel, pdfModelToPreviewHtml, buildPdfFromModel,
            extendPdfModel, pdfModelPagesHtml, pdfModelTotalPages, pdfModelFontFaceCss,
-           hwpToEditableHtml, applyHwpEdits, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260602af-hwptree";
-  // 한글(.hwp/.hwpx) 충실 렌더 — rhwp(Rust+WASM) 의 Canvas 렌더러(주 경로) 사용.
-  import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260601";
+           hwpToEditableHtml, applyHwpEdits, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260602align2";
+  // 한글(.hwp/.hwpx) 충실 렌더 — rhwp(Rust+WASM, 소스빌드 vendor/rhwp) 의 절대배치 HTML 렌더.
+  import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260602fixes";
 
   let rhwpReady = null;
   function ensureRhwp() {
@@ -275,13 +275,14 @@
         if (font !== lastFont) { ctx.font = font; lastFont = font; }
         return ctx.measureText(text || "").width;
       };
-      rhwpReady = rhwpInit({ module_or_path: "./rhwp_bg.wasm?v=20260601" });
+      rhwpReady = rhwpInit({ module_or_path: "./rhwp_bg.wasm?v=20260602fixes" });
     }
     return rhwpReady;
   }
-  // 한글 바이트 → 미리보기 HTML. rhwp 렌더트리(계층)를 흐름 배치로 렌더 — 중첩표(표 안의 표)·셀
-  // 안 이미지를 올바른 셀에 넣고, 표 배경/테두리/병합/글자스타일까지 원본대로. 절대좌표를 안 써서
-  // 상장류 텍스트 밀림 버그를 피한다. (렌더트리 미지원 시 흐름배치로 자동 폴백.)
+  // 한글 바이트 → 미리보기 HTML. **흐름배치(tree) 주 경로** — 중첩표(표 안의 표)·셀 안 이미지까지
+  // 내용 완전하게 렌더. (SVG 충실 렌더 hwpToSvgPreviewHtml 는 픽셀은 정확하나 이미지·중첩표를
+  // 누락하는 회귀가 있어 기본값에서 제외 — 그 누락 수정 후 충실 전환 예정.)
+  // 엔진 수정(글뒤 그림·페이지네이션)은 WASM 에 반영돼 렌더트리 좌표에도 적용된다.
   async function renderHangul(bytes, name) {
     await ensureRhwp();
     const doc = new HwpDocument(bytes);

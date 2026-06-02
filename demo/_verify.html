@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8"><title>verify-pending</title>
+<style>html,body{margin:0;padding:0}iframe{border:0;width:900px;height:100%}</style></head>
+<body>
+<iframe id="out"></iframe>
+<script type="module">
+// 브라우저에서 rhwp WASM 을 실제 canvas 폰트 메트릭으로 구동해 충실 미리보기를 렌더(검증용).
+// 사용: /_verify.html?f=<demo/_samples 내 파일명>&mode=<faithful|tree>
+import { hwpToFaithfulPreviewHtml, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs";
+import rhwpInit, { HwpDocument } from "./rhwp.js";
+
+let ctx = null, lastFont = "";
+globalThis.measureTextWidth = (font, text) => {
+  if (!ctx) ctx = document.createElement("canvas").getContext("2d");
+  if (font !== lastFont) { ctx.font = font; lastFont = font; }
+  return ctx.measureText(text || "").width;
+};
+
+const q = new URLSearchParams(location.search);
+const file = q.get("f");
+const mode = q.get("mode") || "faithful";
+try {
+  await rhwpInit({ module_or_path: "./rhwp_bg.wasm" });
+  const buf = new Uint8Array(await (await fetch("./_samples/" + file)).arrayBuffer());
+  const doc = new HwpDocument(buf);
+  let html;
+  if (mode === "svg") {
+    // 원시 renderPageSvg 페이지들을 그대로 — 충실 렌더의 수평 위치를 SVG 로 검증.
+    let body = "";
+    const n = doc.pageCount();
+    for (let i = 0; i < n; i++) { try { body += `<div class="hp-paper">${doc.renderPageSvg(i)}</div>`; } catch {} }
+    html = `<!DOCTYPE html><meta charset="utf-8"><style>body{margin:0;background:#eceef0}.hp-paper{margin:12px auto;background:#fff;width:fit-content}svg{display:block}</style>${body}`;
+  } else {
+    const fn = mode === "tree" ? hwpToTreePreviewHtml
+             : mode === "html" ? hwpToFaithfulPreviewHtml
+             : hwpToSvgPreviewHtml; // 기본 = 실제 데모 경로(SVG 충실)
+    html = fn(doc, { title: file, rawBytes: buf });
+  }
+  const f = document.getElementById("out");
+  f.srcdoc = html;
+  f.addEventListener("load", () => {
+    // iframe 을 내용 전체 높이로 키워(스크롤 없이) 풀-뷰 스크린샷이 본문을 담게 한다.
+    try { f.style.height = (f.contentDocument.body.scrollHeight + 40) + "px"; } catch {}
+    setTimeout(() => { document.title = "verify-ready:" + mode; }, 1200);
+  });
+} catch (e) {
+  document.body.innerHTML = "<pre style='color:red'>ERROR: " + (e && e.message) + "\n" + (e && e.stack) + "</pre>";
+  document.title = "verify-error";
+}
+</script>
+</body></html>

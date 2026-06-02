@@ -45,7 +45,7 @@ export type { ImageDecoder, ImageDecodeInfo, DecodedImage } from "./core/pdf/ima
 
 // ── rhwp 기반 HWP/HWPX 편집 채널(opt-in) — 표 셀까지 LLM 이 읽고 수정 ────────────
 // rhwp WASM 은 호출측이 초기화한 HwpDocument 를 인자로 받는다(코어는 WASM 미의존).
-export { hwpToEditableHtml, applyHwpEdits, hwpToRichPreviewHtml, hwpToHybridPreviewHtml, hwpToFaithfulPreviewHtml, hwpToTreePreviewHtml } from "./rhwp/hwpEdit.js";
+export { hwpToEditableHtml, applyHwpEdits, hwpToRichPreviewHtml, hwpToHybridPreviewHtml, hwpToFaithfulPreviewHtml, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./rhwp/hwpEdit.js";
 export type { RhwpDoc } from "./rhwp/hwpEdit.js";
 
 // ── 아래한글 HWPX (OWPML) 왕복 API ──────────────────────────────────────────

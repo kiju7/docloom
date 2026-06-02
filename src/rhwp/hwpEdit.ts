@@ -82,6 +82,39 @@ export interface RhwpDoc {
     section: number, parentPara: number, pathJson: string, charOffset: number, count: number,
   ): string;
   getTableCellBboxesByPath?(section: number, parentPara: number, pathJson: string): string;
+  // 중첩표 셀 쓰기(편집-복원) — round-trip 의 핵심.
+  insertTextInCellByPath?(
+    section: number, parentPara: number, pathJson: string, charOffset: number, text: string,
+  ): string;
+  deleteTextInCellByPath?(
+    section: number, parentPara: number, pathJson: string, charOffset: number, count: number,
+  ): string;
+}
+
+/** 중첩표 경로 스텝 → rhwp pathJson. steps = [[controlIndex,cellIndex,cellParaIndex], ...] */
+function cellPathJson(steps: Array<[number, number, number]>): string {
+  return "[" + steps.map(([c, e, p]) => `{"controlIndex":${c},"cellIndex":${e},"cellParaIndex":${p}}`).join(",") + "]";
+}
+
+/**
+ * 한 셀 문단(경로 path 로 지정)이 품은 **중첩표**들을 찾는다. rhwp 엔 "셀 안 컨트롤 열거" API 가
+ * 없어 controlIndex 를 0..MAX 로 탐침: 그 자리 컨트롤이 표면 getTableDimensionsByPath 가 셀 수>0 을
+ * 돌려준다(표가 아니면 null). 연속 실패가 길어도 뒤에 표가 있을 수 있어 고정 상한까지 훑는다.
+ */
+function nestedTablesAt(
+  doc: RhwpDoc, s: number, parentPara: number, path: Array<[number, number, number]>,
+): Array<{ ci: number; rows: number; cols: number; cells: number }> {
+  if (!doc.getTableDimensionsByPath) return [];
+  const out: Array<{ ci: number; rows: number; cols: number; cells: number }> = [];
+  const MAX_CTRL = 16;
+  for (let ci = 0; ci < MAX_CTRL; ci++) {
+    const pj0 = cellPathJson([...path, [ci, 0, 0]]);
+    const dim = pj<{ rowCount: number; colCount: number; cellCount: number }>(
+      safe(() => doc.getTableDimensionsByPath!(s, parentPara, pj0)),
+    );
+    if (dim && dim.cellCount > 0) out.push({ ci, rows: dim.rowCount, cols: dim.colCount, cells: dim.cellCount });
+  }
+  return out;
 }
 
 const esc = (s: string): string =>
@@ -116,10 +149,60 @@ function tablesInPara(doc: RhwpDoc, s: number, p: number): Array<{ ci: number; r
   return out;
 }
 
+/** 중첩 셀 경로 앵커 인코딩: data-hcp="s|parentPara|ci.cell.cp_ci2.cell2.cp2..." (속성 안전). */
+function encodeHcp(s: number, parentPara: number, steps: Array<[number, number, number]>): string {
+  return `${s}|${parentPara}|${steps.map((st) => st.join(".")).join("_")}`;
+}
+/** data-hcp 디코드 → {s, parentPara, steps, pathJson}. 실패 시 null. */
+function decodeHcp(v: string): { s: number; parentPara: number; pathJson: string } | null {
+  const [a, b, stepsStr] = v.split("|");
+  if (a == null || b == null || !stepsStr) return null;
+  const s = Number(a), parentPara = Number(b);
+  const steps = stepsStr.split("_").map((st) => st.split(".").map(Number) as [number, number, number]);
+  if (!Number.isInteger(s) || !Number.isInteger(parentPara) || steps.some((st) => st.length !== 3 || st.some((n) => !Number.isInteger(n)))) return null;
+  return { s, parentPara, pathJson: cellPathJson(steps) };
+}
+
+/**
+ * 한 셀 문단(basePath) 안의 **중첩표**들을 편집 가능한 `<table data-htp>` 로 재귀 렌더한다.
+ * 각 중첩 셀 문단은 `<div data-hcp="...">` 로 경로 앵커를 달아 LLM 이 읽고 고칠 수 있게 하고,
+ * applyHwpEdits 가 insert/deleteTextInCellByPath 로 원본에 되돌린다. 더 깊은 중첩도 재귀로 처리.
+ */
+function renderNestedTablesEditable(
+  doc: RhwpDoc, s: number, parentPara: number, basePath: Array<[number, number, number]>,
+): string {
+  if (!doc.getTextInCellByPath || !doc.getCellParagraphCountByPath || !doc.getCellParagraphLengthByPath) return "";
+  let html = "";
+  for (const nt of nestedTablesAt(doc, s, parentPara, basePath)) {
+    html += `<table class="hwp-tbl hwp-nested" data-htp="${encodeHcp(s, parentPara, [...basePath, [nt.ci, 0, 0]])}">\n<tbody>\n`;
+    let cell = 0;
+    for (let r = 0; r < nt.rows && cell < nt.cells; r++) {
+      html += "<tr>";
+      for (let c = 0; c < nt.cols && cell < nt.cells; c++) {
+        const cpc = safe(() => doc.getCellParagraphCountByPath!(s, parentPara, cellPathJson([...basePath, [nt.ci, cell, 0]]))) ?? 0;
+        let inner = "";
+        for (let cp = 0; cp < cpc; cp++) {
+          const path: Array<[number, number, number]> = [...basePath, [nt.ci, cell, cp]];
+          const pjp = cellPathJson(path);
+          const l = safe(() => doc.getCellParagraphLengthByPath!(s, parentPara, pjp)) ?? 0;
+          const text = l > 0 ? safe(() => doc.getTextInCellByPath!(s, parentPara, pjp, 0, l)) ?? "" : "";
+          inner += `<div data-hcp="${encodeHcp(s, parentPara, path)}">${esc(text) || "<br>"}</div>`;
+          inner += renderNestedTablesEditable(doc, s, parentPara, path); // 더 깊은 중첩
+        }
+        html += `<td>${inner || "<br>"}</td>`;
+        cell++;
+      }
+      html += "</tr>\n";
+    }
+    html += "</tbody>\n</table>\n";
+  }
+  return html;
+}
+
 /**
  * rhwp 문서 → 편집용 HTML.
  * 편집 가능한 텍스트마다 앵커를 단다: 평문 문단 `data-h="s,p"`, 표 셀 문단
- * `data-hc="s,p,control,cell,cellPara"`. 표는 `<table data-ht>` 로 구조를 보존한다.
+ * `data-hc="s,p,control,cell,cellPara"`, **중첩표 셀 `data-hcp="s|parentPara|경로"`**.
  */
 export function hwpToEditableHtml(doc: RhwpDoc): string {
   const secN = sectionCount(doc);
@@ -152,6 +235,8 @@ export function hwpToEditableHtml(doc: RhwpDoc): string {
               const l = safe(() => doc.getCellParagraphLength(s, p, t.ci, cell, cp)) ?? 0;
               const text = l > 0 ? safe(() => doc.getTextInCell(s, p, t.ci, cell, cp, 0, l)) ?? "" : "";
               inner += `<div data-hc="${s},${p},${t.ci},${cell},${cp}">${esc(text) || "<br>"}</div>`;
+              // 이 셀 문단이 품은 중첩표(표 안의 표)도 편집 가능하게 재귀 노출.
+              inner += renderNestedTablesEditable(doc, s, p, [[t.ci, cell, cp]]);
             }
             if (!inner) inner = "<br>";
             body += `<td>${inner}</td>`;
@@ -209,6 +294,22 @@ export function applyHwpEdits(doc: RhwpDoc, editedHtml: string): number {
     changed++;
   }
 
+  // 중첩표(표 안의 표) 셀 문단 — 경로(data-hcp) 기반 insert/deleteTextInCellByPath 로 되돌림.
+  if (doc.getTextInCellByPath && doc.getCellParagraphLengthByPath && doc.insertTextInCellByPath && doc.deleteTextInCellByPath) {
+    for (const el of root.querySelectorAll("[data-hcp]")) {
+      const dec = decodeHcp(el.getAttribute("data-hcp") ?? "");
+      if (!dec) continue;
+      const { s, parentPara, pathJson } = dec;
+      const next = nodeText(el);
+      const len = safe(() => doc.getCellParagraphLengthByPath!(s, parentPara, pathJson)) ?? 0;
+      const cur = norm(len > 0 ? safe(() => doc.getTextInCellByPath!(s, parentPara, pathJson, 0, len)) ?? "" : "");
+      if (cur === next) continue;
+      if (len > 0) safe(() => doc.deleteTextInCellByPath!(s, parentPara, pathJson, 0, len));
+      if (next) safe(() => doc.insertTextInCellByPath!(s, parentPara, pathJson, 0, next));
+      changed++;
+    }
+  }
+
   // 평문 문단
   for (const el of root.querySelectorAll("[data-h]")) {
     const a = addr(el, "data-h");
@@ -253,7 +354,7 @@ function charCss(cp: any): string {
   if (deco.length) css.push(`text-decoration:${deco.join(" ")}`);
   const tc = color(cp.textColor);
   if (tc && tc !== "#000000") css.push(`color:${tc}`);
-  if (typeof cp.fontFamily === "string" && cp.fontFamily) css.push(`font-family:'${cp.fontFamily.replace(/'/g, "")}',sans-serif`);
+  if (typeof cp.fontFamily === "string" && cp.fontFamily) css.push(`font-family:${fontStack(cp.fontFamily)}`);
   return css.join(";");
 }
 
@@ -267,8 +368,9 @@ function renderPara(text: string, charProps: any, paraProps: any): string {
   }
   const cc = charCss(charProps);
   if (cc) css.push(cc);
-  // 빈 문단은 <br> 로 한 줄 높이를 확보(HWP 의 빈 문단 = 세로 간격) → 제목페이지 간격 보존.
-  return `<p style="${css.join(";")}">${esc(text) || "<br>"}</p>`;
+  // 문단 내 줄바꿈(\n, shift+enter)은 <br> 로 보존. 빈 문단은 <br> 로 한 줄 높이 확보(HWP 빈문단=세로간격).
+  const inner = text ? esc(text).replace(/\n/g, "<br>") : "<br>";
+  return `<p style="${css.join(";")}">${inner}</p>`;
 }
 
 /** 표 셀 속성 → td CSS(배경·테두리·세로정렬·너비·패딩). */
@@ -296,7 +398,7 @@ function cellCss(props: any): string {
 interface TableRef { ci: number; rows: number; cols: number; cells: number }
 
 interface GridCell {
-  row: number; col: number; rowSpan: number; colSpan: number; props: any; html: string;
+  row: number; col: number; rowSpan: number; colSpan: number; props: any; html: string; bg?: string;
 }
 
 /**
@@ -577,8 +679,9 @@ export function hwpToRichPreviewHtml(
 </style></head><body>${pagesHtml}</body></html>`;
 }
 
-/** SVG 의 모든 <text> 글자를 읽기순서로 이어붙인 "글자 수프"(공백제거). 렌더 누락 판별용. */
-function svgGlyphSoup(svgs: string[]): string {
+/** SVG 의 모든 <text> 글자를 읽기순서로 이어붙인 "글자 수프"(공백제거). 렌더 누락 판별용.
+ *  (검증 하베스트 scripts/hwp-verify.ts 가 Tier A SVG 누락 판정에 재사용 — 단일 출처.) */
+export function svgGlyphSoup(svgs: string[]): string {
   let soup = "";
   for (const svg of svgs) {
     for (const m of svg.matchAll(/<text\b[^>]*>([^<]*)<\/text>/g)) {
@@ -656,12 +759,44 @@ export function hwpToHybridPreviewHtml(doc: RhwpDoc, opts: { title?: string } = 
 }
 
 /**
+ * **SVG 충실 미리보기(권장 주 경로)** — rhwp 의 `renderPageSvg` 를 페이지별로 그대로 쌓는다.
+ * SVG 렌더러는 원본 좌표·여백·줄바꿈·수식·표·글뒤 배경을 정확히 그린다("동일하게"). renderPageHtml
+ * 은 본문을 우측으로 밀어 잘리는 수평 결함이 있어 쓰지 않는다(SVG 는 그 결함이 없음 — 브라우저
+ * 실측 검증 scripts/shot.ts 로 확인). 절대좌표를 안 만지는 흐름배치(tree)와 달리 픽셀 충실하다.
+ * SVG 가 비거나(렌더 불가) 실패하면 흐름배치 `hwpToTreePreviewHtml` 로 폴백한다.
+ */
+export function hwpToSvgPreviewHtml(
+  doc: RhwpDoc,
+  opts: { title?: string; rawBytes?: Uint8Array } = {},
+): string {
+  const n = doc.pageCount ? safe(() => doc.pageCount!()) ?? 0 : 0;
+  const pages: string[] = [];
+  if (doc.renderPageSvg) {
+    for (let i = 0; i < n; i++) {
+      const svg = safe(() => doc.renderPageSvg!(i));
+      // 과대 SVG(대용량 이미지 임베드)는 건너뛰되 페이지 자리는 유지하지 않는다(브라우저 보호).
+      if (svg && svg.length < 16_000_000) pages.push(`<div class="hp-paper">${svg}</div>`);
+    }
+  }
+  // SVG 렌더 불가 → 흐름배치 트리 미리보기로 폴백(안전망).
+  if (pages.length === 0) return hwpToTreePreviewHtml(doc, opts);
+  const title = esc(opts.title ?? "한글 미리보기");
+  return `<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
+<style>
+  body{margin:0;background:#eceef0;padding:24px 0;font-family:'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif}
+  .hp-paper{margin:0 auto 22px;background:#fff;width:fit-content;max-width:97%;
+    box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.10)}
+  .hp-paper svg{display:block;max-width:100%;height:auto}
+</style></head><body>${pages.join("\n")}</body></html>`;
+}
+
+/**
  * renderPageHtml 한 페이지에서 "콘텐츠가 페이지 높이 밖으로 얼마나 밀렸는지"(px)를 잰다.
  * rhwp 는 '글 뒤(behind)' floating 배경(예: 상장 테두리)을 흐름 공간으로 잘못 계산해 본문을
  * 프레임 높이만큼 아래로 밀어버리는 버그가 있다 → 페이지 높이 고정+overflow:hidden 에 잘려
  * 텍스트가 통째로 사라진다. 이 값이 크면 그 버그에 걸린 페이지다.
  */
-function pageContentOverflow(pageHtml: string): number {
+export function pageContentOverflow(pageHtml: string): number {
   const pageH = Number(pageHtml.match(/class="hwp-page"[^>]*?height:([\d.]+)px/)?.[1] ?? 0);
   if (!pageH) return 0;
   let maxBottom = 0;
@@ -699,8 +834,9 @@ export function hwpToFaithfulPreviewHtml(
     worstOverflow = Math.max(worstOverflow, pageContentOverflow(h));
   }
   // renderPageHtml 미지원/실패, 또는 rhwp 레이아웃 버그로 본문이 페이지 밖으로 크게 밀린 경우
-  // (텍스트 잘림) → 흐름배치 미리보기로 폴백. 임계값 200px(약 페이지 높이의 18%).
-  if (rendered.length === 0 || worstOverflow > 200) return hwpToRichPreviewHtml(doc, opts);
+  // (텍스트 잘림) → 트리 미리보기로 폴백(절대좌표 안 써서 안 잘리고, 중첩표·셀이미지도 살린다).
+  // 임계값 200px(약 페이지 높이의 18%).
+  if (rendered.length === 0 || worstOverflow > 200) return hwpToTreePreviewHtml(doc, opts);
 
   const pages = rendered.map((h) => `<div class="hp-paper">${h}</div>`);
   const title = esc(opts.title ?? "한글 미리보기");
@@ -731,15 +867,129 @@ interface TNode {
   children?: TNode[];
 }
 
+/** 페이지 이미지(rhwp renderPageHtml 가 binItemID 로 올바르게 해석해 임베드한 것 + 위치). */
+interface PageImg { x: number; y: number; src: string; used: boolean }
+
+/** 셀 배경(rhwp renderPageHtml 의 색칠된 절대배치 div). 셀 bbox 로 매칭해 배경색 적용. */
+interface CellBg { x: number; y: number; color: string }
+
 interface TreeCtx {
   doc: RhwpDoc;
   styles: Map<string, string>; // "x,y"(소수1자리) → run CSS
-  pool: string[];              // BinData 이미지 data URI(문서순)
-  cur: { i: number };          // 풀 커서(문서 전역 공유)
+  leadX: Map<string, number>;  // "x,y" → 텍스트에 합쳐진 선행 공백 픽셀폭(탭 정렬 보존)
+  pageImgs: PageImg[];         // 현재 페이지의 rhwp 임베드 이미지(위치 매칭용) — 정답 바이트
+  cellBgs: CellBg[];           // 현재 페이지의 셀 배경색(위치 매칭용) — 중첩표 헤더색 등
+  pool: string[];              // BinData 이미지 data URI(폴백; 이름순이라 순서 부정확)
+  cur: { i: number };          // 풀 커서(문서 전역 공유; 폴백용)
   sec: number;                 // 섹션(보통 0)
+  pageW: number; pageH: number; // 용지 px(쪽배경 그림 판정용)
+  bgLayers: string[];          // 페이지 대부분 덮는 그림(테두리/워터마크) → 절대배치 배경으로 올림
+}
+
+/**
+ * rhwp renderPageHtml(pg) 의 <img>(절대배치)에서 위치+바이트를 뽑는다. ⚠ BinData 이름순(BIN0001..)
+ * 은 문서 읽기순서와 다를 수 있어(이 파일은 12개 중 11개가 어긋남) 풀-인덱스 매칭이 틀린다.
+ * renderPageHtml 은 rhwp 가 그림 컨트롤→binItemID→스트림을 정확히 해석해 임베드하므로, 그
+ * <img> 위치(left/top)를 트리 Image 노드 bbox 와 맞추면 각 노드의 **정답 바이트**를 얻는다.
+ */
+function buildPageImages(doc: RhwpDoc, pg: number): PageImg[] {
+  const html = doc.renderPageHtml ? safe(() => doc.renderPageHtml!(pg)) : undefined;
+  if (!html) return [];
+  const out: PageImg[] = [];
+  for (const m of html.matchAll(/<img\b[^>]*>/g)) {
+    const tag = m[0];
+    const src = tag.match(/src="(data:[^"]+)"/)?.[1];
+    const x = Number(tag.match(/left:(-?[\d.]+)px/)?.[1]); // 음수 좌표(페이지 밖 일부)도 매칭
+    const y = Number(tag.match(/top:(-?[\d.]+)px/)?.[1]);
+    if (src && isFinite(x) && isFinite(y)) out.push({ x, y, src, used: false });
+  }
+  return out;
+}
+
+/** 트리 Image 노드 bbox 에 가장 가까운(미사용) 페이지 이미지 src(없으면 BinData 풀 폴백). */
+function imageSrcFor(node: TNode, ctx: TreeCtx): string | undefined {
+  const b = node.bbox;
+  if (b) {
+    let best = -1, bestD = 5; // 5px 임계(같은 레이아웃 엔진이라 보통 0.1px 이내로 일치)
+    for (let i = 0; i < ctx.pageImgs.length; i++) {
+      const im = ctx.pageImgs[i]!;
+      if (im.used) continue;
+      const d = Math.abs(im.x - b.x) + Math.abs(im.y - b.y);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best >= 0) { ctx.pageImgs[best]!.used = true; return ctx.pageImgs[best]!.src; }
+  }
+  // 폴백: BinData 풀(순서 부정확하지만 renderPageHtml 미지원/매칭실패 시 최후수단).
+  const uri = ctx.pool[ctx.cur.i];
+  if (uri !== undefined) { ctx.cur.i++; return uri; }
+  return undefined;
+}
+
+/**
+ * renderPageHtml(pg) 의 색칠된 절대배치 div(셀 배경)에서 위치+색을 뽑는다. 중첩표 헤더색 등은
+ * getCellProperties(최상위만)·렌더트리(색 없음)로 못 얻지만 renderPageHtml 엔 칠해져 있다.
+ * 흰색(#ffffff)/페이지 전체배경은 제외. 셀 bbox 좌상단과 매칭해 <td> 배경으로 쓴다.
+ */
+function buildCellBgs(doc: RhwpDoc, pg: number): CellBg[] {
+  const html = doc.renderPageHtml ? safe(() => doc.renderPageHtml!(pg)) : undefined;
+  if (!html) return [];
+  const out: CellBg[] = [];
+  for (const m of html.matchAll(/<(?:div|td)\b[^>]*style="([^"]*)"[^>]*>/g)) {
+    const st = m[1]!;
+    const color = st.match(/background(?:-color)?:\s*(#[0-9a-fA-F]{6})/)?.[1];
+    if (!color || color.toLowerCase() === "#ffffff") continue;
+    const x = Number(st.match(/left:(-?[\d.]+)px/)?.[1]);
+    const y = Number(st.match(/top:(-?[\d.]+)px/)?.[1]);
+    const w = Number(st.match(/width:([\d.]+)px/)?.[1]);
+    const h = Number(st.match(/height:([\d.]+)px/)?.[1]);
+    // 페이지 전체를 덮는 배경(쪽 배경)은 셀이 아니므로 제외.
+    if (!isFinite(x) || !isFinite(y) || (w > 700 && h > 1000)) continue;
+    out.push({ x, y, color });
+  }
+  return out;
+}
+
+/** 셀 bbox 좌상단에 가장 가까운(3px 내) 배경색. */
+function cellBgFor(bbox: TNode["bbox"], ctx: TreeCtx): string | undefined {
+  if (!bbox) return undefined;
+  let best: string | undefined, bestD = 3;
+  for (const c of ctx.cellBgs) {
+    const d = Math.abs(c.x - bbox.x) + Math.abs(c.y - bbox.y);
+    if (d < bestD) { bestD = d; best = c.color; }
+  }
+  return best;
+}
+
+/**
+ * 줄 정렬을 기하로 유도(rhwp 가 정렬필드를 안 줌). ⚠ TextLine bbox 는 문단 **내용영역 전체폭**(셀
+ * 안에서 거의 가운데)이라 그걸 쓰면 다 가운데가 된다. 실제 정렬은 **글자(run) 위치**로 본다:
+ * 줄 내용박스(line.bbox) 안에서 글자뭉치가 왼쪽 붙음=left, 오른쪽 붙음=right, 가운데=center.
+ */
+function lineAlign(line: TNode): string {
+  const box = line.bbox;
+  const runs = (line.children ?? []).filter((c) => c.type === "TextRun" && c.bbox && (c.text ?? "").length);
+  if (!box || box.w <= 0 || !runs.length) return "";
+  const textLeft = Math.min(...runs.map((r) => r.bbox!.x));
+  const textRight = Math.max(...runs.map((r) => r.bbox!.x + r.bbox!.w));
+  const leftGap = textLeft - box.x;
+  const rightGap = (box.x + box.w) - textRight;
+  const tol = Math.max(6, box.w * 0.03);
+  if (leftGap <= tol) return "";                                  // 왼쪽(기본)
+  if (rightGap <= tol) return "right";                            // 오른쪽
+  if (Math.abs(leftGap - rightGap) <= box.w * 0.15) return "center"; // 가운데
+  return "";                                                      // 들여쓰기 등은 왼쪽 취급
 }
 
 /** getPageTextLayout 런 → CSS 선언. fontSize 는 px(96dpi)이라 ×0.75 로 pt 환산. */
+/** 한글 글꼴명 → 폰트 스택. 바탕/명조/궁서 계열은 세리프, 그 외(고딕/굴림/돋움/맑은)는 산세리프 폴백. */
+function fontStack(family: string): string {
+  const f = family.replace(/'/g, "");
+  const serif = /바탕|명조|궁서|신명|Batang|Myeongjo|Gungsuh|Serif/i.test(f);
+  return serif
+    ? `'${f}','바탕','Batang','Noto Serif KR',serif`
+    : `'${f}','맑은 고딕','Malgun Gothic','Noto Sans KR',sans-serif`;
+}
+
 function runCss(r: any): string {
   const css: string[] = [];
   if (typeof r.fontSize === "number") css.push(`font-size:${(r.fontSize * 0.75).toFixed(1)}pt`);
@@ -751,9 +1001,11 @@ function runCss(r: any): string {
   if (deco.length) css.push(`text-decoration:${deco.join(" ")}`);
   const tc = color(r.textColor);
   if (tc && tc !== "#000000") css.push(`color:${tc}`);
-  if (typeof r.fontFamily === "string" && r.fontFamily) {
-    css.push(`font-family:'${r.fontFamily.replace(/'/g, "")}',sans-serif`);
+  // 자간(letterSpacing, px). HWP 장평(ratio)도 있으나 레이아웃 깨짐 위험으로 자간만 반영.
+  if (typeof r.letterSpacing === "number" && Math.abs(r.letterSpacing) > 0.1) {
+    css.push(`letter-spacing:${r.letterSpacing.toFixed(1)}px`);
   }
+  if (typeof r.fontFamily === "string" && r.fontFamily) css.push(`font-family:${fontStack(r.fontFamily)}`);
   return css.join(";");
 }
 
@@ -771,57 +1023,169 @@ function buildRunStyles(doc: RhwpDoc, pg: number): Map<string, string> {
 const runStyleFor = (node: TNode, ctx: TreeCtx): string =>
   node.bbox ? ctx.styles.get(`${node.bbox.x.toFixed(1)},${node.bbox.y.toFixed(1)}`) ?? "" : "";
 
-/** 트리 노드 → HTML(재귀). inCell: 표 셀 안(중첩표는 최상위 스타일 API 미적용). */
-function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean): string {
+/**
+ * 런 bbox키 → **텍스트에 합쳐진 선행 공백(탭 포함)의 픽셀 폭**. getPageTextLayout 의 글자별 x(charX)
+ * 로 첫 비공백 글자의 오프셋을 떼어낸다. 탭 정렬/수동 들여쓰기가 별도 런이 아니라 텍스트 앞에 붙어
+ * 있는 줄(예: "33칸+탭+프로젝트…")을 정확한 폭의 스페이서로 바꿔 원본 가로 위치를 보존한다.
+ */
+function buildRunLeadX(doc: RhwpDoc, pg: number): Map<string, number> {
+  const m = new Map<string, number>();
+  const tl = doc.getPageTextLayout ? pj<any>(safe(() => doc.getPageTextLayout!(pg))) : null;
+  for (const r of (tl?.runs ?? [])) {
+    if (typeof r?.x !== "number" || typeof r?.y !== "number" || !Array.isArray(r.charX)) continue;
+    const t: string = typeof r.text === "string" ? r.text : "";
+    if (!/^[\s ]/.test(t)) continue;
+    const chars = [...t];
+    const idx = chars.findIndex((c) => !/[\s ]/.test(c));
+    if (idx <= 0) continue; // 전체공백(별도 처리) 또는 선행공백 없음
+    const lead = r.charX[idx];
+    if (typeof lead === "number" && lead > 0.5) m.set(`${r.x.toFixed(1)},${r.y.toFixed(1)}`, lead);
+  }
+  return m;
+}
+
+/** 트리 노드 → HTML(재귀). inCell: 표 셀 안. cont: 정렬 판정용 담는 가로범위(셀/본문). */
+function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: number; w: number }): string {
   switch (node.type) {
     case "Table":
       return renderTreeTable(node, ctx, !inCell);
     case "Image": {
-      const uri = ctx.pool[ctx.cur.i];
+      const uri = imageSrcFor(node, ctx); // 위치(bbox) 매칭 → 정답 바이트(폴백: 풀)
       if (uri === undefined) return "";
-      ctx.cur.i++;
       const b = node.bbox;
+      // (쪽배경 그림이 있는 페이지는 renderAbsBgPage 가 따로 처리 → 여기 안 옴.)
       const dim = b && b.w > 0 && b.h > 0 ? `width:${Math.round(b.w)}px;height:${Math.round(b.h)}px;` : "";
       return `<div class="hp-img"><img alt="" style="${dim}max-width:100%" src="${uri}"></div>`;
     }
     case "TextLine": {
+      // 줄 안의 글자(TextRun)와 **글자처럼 박힌 그림(Image)** 을 함께 렌더(그림 누락 방지).
       const html = (node.children ?? [])
-        .filter((c) => c.type === "TextRun")
-        .map((r) => {
-          const st = runStyleFor(r, ctx);
-          const t = esc(r.text ?? "");
-          return st ? `<span style="${st}">${t}</span>` : t;
+        .map((c) => {
+          if (c.type === "TextRun") {
+            const raw = c.text ?? "";
+            // 공백·탭만으로 된 런(탭 정렬·수동 들여쓰기 등)은 HTML 이 공백을 접어 위치가 무너진다.
+            // → 런 bbox 폭만큼의 스페이서로 대체해 원본 가로 위치를 보존(예: "프로젝트 팀(원)…" 우측배치).
+            if (raw.length > 0 && /^[\s ]+$/.test(raw) && c.bbox && c.bbox.w > 0) {
+              return `<span style="display:inline-block;width:${Math.round(c.bbox.w)}px"></span>`;
+            }
+            const st = runStyleFor(c, ctx);
+            const style = st ? `${st};white-space:pre-wrap` : "white-space:pre-wrap";
+            // 텍스트에 합쳐진 선행 공백 → charX 기반 정확폭 스페이서 + 나머지 텍스트
+            // (별도 런이 아니라 "33칸+탭+프로젝트…"처럼 텍스트 앞에 붙어 안 잡히던 케이스).
+            const lead = c.bbox ? ctx.leadX.get(`${c.bbox.x.toFixed(1)},${c.bbox.y.toFixed(1)}`) : undefined;
+            if (lead && /^[\s ]/.test(raw)) {
+              const ch = [...raw];
+              const i = ch.findIndex((x) => !/[\s ]/.test(x));
+              if (i > 0) {
+                const rest = esc(ch.slice(i).join(""));
+                return `<span style="display:inline-block;width:${Math.round(lead)}px"></span><span style="${style}">${rest}</span>`;
+              }
+            }
+            // 런 내부 연속 공백(수동 간격)도 보존: white-space:pre-wrap.
+            return `<span style="${style}">${esc(raw)}</span>`;
+          }
+          if (c.type === "Image") {
+            const uri = imageSrcFor(c, ctx);
+            if (!uri) return "";
+            const b = c.bbox;
+            const dim = b && b.w > 0 && b.h > 0 ? `width:${Math.round(b.w)}px;height:${Math.round(b.h)}px;` : "";
+            return `<img alt="" style="${dim}max-width:100%;vertical-align:top" src="${uri}">`;
+          }
+          return "";
         })
         .join("");
-      return `<div class="hp-ln">${html || "<br>"}</div>`;
+      const styles: string[] = [];
+      const align = lineAlign(node);
+      if (align) styles.push(`text-align:${align}`);
+      // 빈 줄(원본의 빈 문단)은 그 높이만큼 세로공간 확보 → 원본 줄간격/배치 보존.
+      if (!html && node.bbox && node.bbox.h > 0) styles.push(`height:${Math.round(node.bbox.h)}px`);
+      const style = styles.length ? ` style="${styles.join(";")}"` : "";
+      return `<div class="hp-ln"${style}>${html || "<br>"}</div>`;
     }
     case "TextRun":
       return esc(node.text ?? "");
+    case "Header": case "Footer":
+      // 머리말/꼬리말(쪽번호 등)은 흐름이 아니라 **실제 좌표로 절대배치**(페이지 상/하단 고정).
+      return renderHeaderFooter(node, ctx);
     case "PageBg": case "Rect": case "Line":
       return ""; // 장식(배경/셀선) — 색은 셀 스타일에서 따로 취득
     default:
-      // Page, Body, Column, Header, Footer, Group, Cell 등 → 자식 이어붙임
-      return (node.children ?? []).map((c) => renderTreeNode(c, ctx, inCell)).join("");
+      // Page, Body, Column, Group, Cell 등 → 자식 이어붙임
+      return (node.children ?? []).map((c) => renderTreeNode(c, ctx, inCell, cont)).join("");
   }
 }
 
-/** 트리 Table → <table>. topLevel 이면 getCellInfo(병합)/getCellProperties(배경·테두리) 보강. */
+/** 머리말/꼬리말 안 글줄을 실제 좌표(글자 x, 줄 y)로 절대배치한 div 들로. 쪽번호는 가운데 등 원본대로. */
+function renderHeaderFooter(node: TNode, ctx: TreeCtx): string {
+  const out: string[] = [];
+  (function walk(n: TNode) {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "TextLine") {
+      const runs = (n.children ?? []).filter((c) => c.type === "TextRun" && c.bbox && (c.text ?? "").length);
+      if (runs.length && n.bbox) {
+        const minX = Math.min(...runs.map((r) => r.bbox!.x));
+        const inner = runs.map((r) => {
+          const st = runStyleFor(r, ctx);
+          const t = esc(r.text ?? "");
+          return st ? `<span style="${st}">${t}</span>` : t;
+        }).join("");
+        out.push(`<div class="hp-hf" style="left:${Math.round(minX)}px;top:${Math.round(n.bbox.y)}px">${inner}</div>`);
+      }
+      return;
+    }
+    if (n.type === "Image" && n.bbox) {
+      const uri = imageSrcFor(n, ctx);
+      if (uri) {
+        out.push(`<img class="hp-hf" alt="" style="left:${Math.round(n.bbox.x)}px;top:${Math.round(n.bbox.y)}px;` +
+          `width:${Math.round(n.bbox.w)}px;height:${Math.round(n.bbox.h)}px" src="${uri}">`);
+      }
+      return;
+    }
+    for (const k of (n.children ?? [])) walk(k);
+  })(node);
+  return out.join("");
+}
+
+/**
+ * 트리 Table → <table>. topLevel 이면 getCellInfo(병합)/getCellProperties(배경·테두리)로 보강.
+ * ⚠ 렌더트리는 **페이지에 보이는 셀만**(표가 여러 페이지에 걸치면 일부만) 담는데, getCellInfo(k)
+ * 는 전체 논리셀을 0부터 센다 → 인덱스로 짝지으면 어긋난다. 그래서 (row,col)로 짝짓는다:
+ * 전체 논리셀의 (row,col)→{info,props} 맵을 만들고, 각 트리 셀을 자기 (row,col)로 조회한다.
+ */
 function renderTreeTable(node: TNode, ctx: TreeCtx, topLevel: boolean): string {
   const cellNodes = (node.children ?? []).filter((c) => c.type === "Cell");
   const cols = node.cols && node.cols > 0 ? node.cols : 1;
   const hasIds = typeof node.pi === "number" && typeof node.ci === "number";
-  const grid: GridCell[] = cellNodes.map((cell, k) => {
-    const info = topLevel && hasIds && ctx.doc.getCellInfo
-      ? pj<any>(safe(() => ctx.doc.getCellInfo!(ctx.sec, node.pi!, node.ci!, k))) : null;
-    const props = topLevel && hasIds && ctx.doc.getCellProperties
-      ? pj<any>(safe(() => ctx.doc.getCellProperties!(ctx.sec, node.pi!, node.ci!, k))) : null;
-    const inner = (cell.children ?? []).map((c) => renderTreeNode(c, ctx, true)).join("");
+
+  // 전체 논리셀의 속성을 (row,col)로 색인(최상위 표만 — 중첩표는 pi/ci 가 없어 트리값 사용).
+  const byRC = new Map<string, { info: any; props: any }>();
+  if (topLevel && hasIds && ctx.doc.getCellInfo) {
+    const dims = ctx.doc.getTableDimensions
+      ? pj<any>(safe(() => ctx.doc.getTableDimensions!(ctx.sec, node.pi!, node.ci!))) : null;
+    const total = typeof dims?.cellCount === "number" ? dims.cellCount : cellNodes.length;
+    for (let k = 0; k < total; k++) {
+      const info = pj<any>(safe(() => ctx.doc.getCellInfo!(ctx.sec, node.pi!, node.ci!, k)));
+      if (!info || typeof info.row !== "number" || typeof info.col !== "number") continue;
+      const props = ctx.doc.getCellProperties
+        ? pj<any>(safe(() => ctx.doc.getCellProperties!(ctx.sec, node.pi!, node.ci!, k))) : null;
+      byRC.set(`${info.row},${info.col}`, { info, props });
+    }
+  }
+
+  const grid: GridCell[] = cellNodes.map((cell) => {
+    const row = cell.row ?? 0, col = cell.col ?? 0;
+    const m = byRC.get(`${row},${col}`);
+    const rs = m?.info?.rowSpan, cs = m?.info?.colSpan;
+    // 셀 내용은 셀 가로범위(bbox)를 정렬 기준으로 렌더.
+    const cont = cell.bbox ? { x: cell.bbox.x, w: cell.bbox.w } : undefined;
+    const inner = (cell.children ?? []).map((c) => renderTreeNode(c, ctx, true, cont)).join("");
     return {
-      row: typeof info?.row === "number" ? info.row : cell.row ?? 0,
-      col: typeof info?.col === "number" ? info.col : cell.col ?? 0,
-      rowSpan: info?.rowSpan > 0 ? info.rowSpan : 1,
-      colSpan: info?.colSpan > 0 ? info.colSpan : 1,
-      props, html: inner || "<br>",
+      row, col, // 배치는 트리 좌표(페이지에 보이는 그대로)
+      rowSpan: typeof rs === "number" && rs > 0 ? rs : 1,
+      colSpan: typeof cs === "number" && cs > 0 ? cs : 1,
+      props: m?.props ?? null,
+      bg: cellBgFor(cell.bbox, ctx), // renderPageHtml 에서 추출한 셀 배경색(중첩표 헤더 등)
+      html: inner || "<br>",
     };
   });
   return assembleTreeTable(grid, cols, topLevel);
@@ -850,7 +1214,9 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
       .map((c) => {
         const span = (c.colSpan > 1 ? ` colspan="${c.colSpan}"` : "") + (c.rowSpan > 1 ? ` rowspan="${c.rowSpan}"` : "");
         // 최상위 셀은 원본 배경/테두리(cellCss), 중첩 셀은 API 부재라 기본 테두리.
-        const css = c.props ? cellCss(c.props) : "border:1px solid #bbb;padding:3px 6px;vertical-align:top";
+        const base = c.props ? cellCss(c.props) : "border:1px solid #bbb;padding:3px 6px;vertical-align:top";
+        // renderPageHtml 에서 추출한 셀 배경색으로 보강(중첩표 헤더색 등 — cellCss 가 못 얻는 것).
+        const css = c.bg ? `${base};background:${c.bg}` : base;
         return `<td${span} style="${css}">${c.html}</td>`;
       })
       .join("");
@@ -861,9 +1227,79 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
   return `<table class="${cls}"${widthStyle}>${colgroup}<tbody>\n${trs}</tbody></table>`;
 }
 
+/** 페이지 60%↑ 덮는 그림(쪽배경: 상장 테두리·워터마크)을 찾는다(가장 큰 것). 없으면 null. */
+function findFullPageBg(root: TNode, pageW: number, pageH: number): TNode | null {
+  let best: TNode | null = null;
+  let bestArea = 0;
+  (function walk(n: TNode) {
+    if (!n || typeof n !== "object") return;
+    const b = n.bbox;
+    if (n.type === "Image" && b && b.w >= pageW * 0.6 && b.h >= pageH * 0.6 && b.w * b.h > bestArea) {
+      bestArea = b.w * b.h;
+      best = n;
+    }
+    for (const k of (n.children ?? [])) walk(k);
+  })(root);
+  return best;
+}
+
+const median = (a: number[]): number => (a.length ? a.slice().sort((x, y) => x - y)[a.length >> 1]! : 0);
+
+/**
+ * 쪽배경 그림 페이지(상장 등). rhwp 의 텍스트 **좌표**는 '글 뒤 배경'을 흐름으로 오계산해 페이지
+ * 밖으로 밀려있어 못 쓴다. 대신 **실제 파싱된 문단값을 그대로** 쓴다: 표 셀의 각 문단을
+ * getCellParaPropertiesAt(정렬)·getCellCharPropertiesAt(글자속성)·getTextInCell(텍스트)로 읽어
+ * `renderPara` 로 흘려 배치. 가로 내용영역(x/너비)은 트리 TextLine bbox 중앙값(원본 글 영역).
+ * 배경 그림은 글 뒤(절대배치), 본문은 용지 안에서 세로 가운데.
+ */
+function renderBgPageFlow(tree: TNode, bg: TNode, ctx: TreeCtx): string {
+  const bb = bg.bbox!;
+  const bgUri = imageSrcFor(bg, ctx);
+  const bgImg = bgUri
+    ? `<img class="hp-bg" alt="" style="left:${Math.round(bb.x)}px;top:${Math.round(bb.y)}px;` +
+      `width:${Math.round(bb.w)}px;height:${Math.round(bb.h)}px" src="${bgUri}">`
+    : "";
+  // 가로 내용영역 = 글 있는 TextLine bbox 의 중앙값(셀 안 실제 글 영역).
+  const xs: number[] = [], rs: number[] = [];
+  (function f(n: TNode) {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "TextLine" && n.bbox && (n.children ?? []).some((c) => c.type === "TextRun" && (c.text ?? "").length)) {
+      xs.push(n.bbox.x); rs.push(n.bbox.x + n.bbox.w);
+    }
+    for (const k of (n.children ?? [])) f(k);
+  })(tree);
+  const cx = median(xs), cw = Math.max(1, median(rs) - cx);
+  // 텍스트 = 표 셀의 실제 문단값(정렬·글자속성·텍스트) 그대로.
+  let table: TNode | null = null;
+  (function f(n: TNode) {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "Table" && typeof n.pi === "number" && !table) table = n;
+    for (const k of (n.children ?? [])) f(k);
+  })(tree);
+  let body = "";
+  const t = table as TNode | null;
+  if (t && typeof t.pi === "number" && typeof t.ci === "number") {
+    const dims = ctx.doc.getTableDimensions ? pj<any>(safe(() => ctx.doc.getTableDimensions!(ctx.sec, t.pi!, t.ci!))) : null;
+    const cells = typeof dims?.cellCount === "number" ? dims.cellCount : 1;
+    for (let cell = 0; cell < cells; cell++) {
+      const cpc = safe(() => ctx.doc.getCellParagraphCount(ctx.sec, t.pi!, t.ci!, cell)) ?? 0;
+      for (let cp = 0; cp < cpc; cp++) {
+        const len = safe(() => ctx.doc.getCellParagraphLength(ctx.sec, t.pi!, t.ci!, cell, cp)) ?? 0;
+        const text = len > 0 ? safe(() => ctx.doc.getTextInCell(ctx.sec, t.pi!, t.ci!, cell, cp, 0, len)) ?? "" : "";
+        const cc = ctx.doc.getCellCharPropertiesAt ? pj(safe(() => ctx.doc.getCellCharPropertiesAt!(ctx.sec, t.pi!, t.ci!, cell, cp, 0))) : null;
+        const pcp = ctx.doc.getCellParaPropertiesAt ? pj(safe(() => ctx.doc.getCellParaPropertiesAt!(ctx.sec, t.pi!, t.ci!, cell, cp))) : null;
+        body += renderPara(text, cc, pcp);
+      }
+    }
+  }
+  return `<div class="hp-page hp-bgpage">${bgImg}` +
+    `<div class="hp-body" style="margin-left:${Math.round(cx)}px;width:${Math.round(cw)}px">${body}</div></div>`;
+}
+
 /**
  * rhwp getPageRenderTree 를 페이지별로 흐름 HTML 로 렌더하는 **트리 미리보기**.
  * 중첩표·셀 안 이미지를 올바른 셀에 그리고, 최상위 셀은 배경/테두리/병합/글자스타일까지 원본대로.
+ * 쪽배경(상장 테두리) 페이지는 글자 실제좌표로 절대배치.
  * (getPageRenderTree 미지원/빈 결과 시 흐름배치 hwpToRichPreviewHtml 로 폴백.)
  */
 export function hwpToTreePreviewHtml(
@@ -873,9 +1309,13 @@ export function hwpToTreePreviewHtml(
   const n = doc.pageCount && doc.getPageRenderTree ? safe(() => doc.pageCount!()) ?? 0 : 0;
   const pageDef = doc.getPageDef ? pj<any>(safe(() => doc.getPageDef!(0))) : null;
   const pageW = pageDef && pageDef.width ? hu2px(pageDef.width) : 794;
+  const pageH = pageDef && pageDef.height ? hu2px(pageDef.height) : 1123;
+  const mL = hu2px(pageDef?.marginLeft ?? 0), mR = hu2px(pageDef?.marginRight ?? 0);
   const pad = pageDef
-    ? `${hu2px(pageDef.marginTop ?? 0)}px ${hu2px(pageDef.marginRight ?? 0)}px ${hu2px(pageDef.marginBottom ?? 0)}px ${hu2px(pageDef.marginLeft ?? 0)}px`
+    ? `${hu2px(pageDef.marginTop ?? 0)}px ${mR}px ${hu2px(pageDef.marginBottom ?? 0)}px ${mL}px`
     : "40px 44px";
+  // 본문 텍스트 정렬 판정용 페이지 내용영역(좌여백~우여백) — 절대 페이지좌표 기준.
+  const bodyCont = { x: mL, w: Math.max(1, pageW - mL - mR) };
 
   const pool = opts.rawBytes ? extractHwpBinImages(opts.rawBytes) : [];
   const cur = { i: 0 };
@@ -883,8 +1323,13 @@ export function hwpToTreePreviewHtml(
   for (let pg = 0; pg < n; pg++) {
     const tree = pj<TNode>(safe(() => doc.getPageRenderTree!(pg)));
     if (!tree) continue;
-    const ctx: TreeCtx = { doc, styles: buildRunStyles(doc, pg), pool, cur, sec: 0 };
-    pages.push(`<div class="hp-page">${renderTreeNode(tree, ctx, false)}</div>`);
+    const ctx: TreeCtx = {
+      doc, styles: buildRunStyles(doc, pg), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
+      cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
+    };
+    // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
+    const bg = findFullPageBg(tree, pageW, pageH);
+    pages.push(bg ? renderBgPageFlow(tree, bg, ctx) : `<div class="hp-page">${renderTreeNode(tree, ctx, false, bodyCont)}</div>`);
   }
   // 트리 미지원/실패 → 기존 흐름배치 미리보기로 폴백(안전망).
   if (pages.length === 0) return hwpToRichPreviewHtml(doc, opts);
@@ -893,13 +1338,21 @@ export function hwpToTreePreviewHtml(
   return `<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
 <style>
   body{margin:0;background:#eceef0;padding:24px 0;font-family:'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#111}
-  .hp-page{width:${pageW}px;max-width:96%;margin:0 auto 22px;background:#fff;padding:${pad};
+  /* 각 페이지는 원본 용지(A4 등) 비율로: 폭 고정 + 용지 높이만큼 min-height(짧은 페이지도 종이처럼). */
+  .hp-page{position:relative;width:${pageW}px;min-height:${pageH}px;max-width:96%;margin:0 auto 22px;background:#fff;padding:${pad};
     box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.10);line-height:1.5;font-size:10.5pt;box-sizing:border-box}
+  /* 쪽배경(상장 테두리) 페이지: 그림은 글 뒤(절대), 본문은 실제 내용영역에서 세로 가운데. */
+  .hp-bgpage{padding:0;display:flex;flex-direction:column;justify-content:center}
+  .hp-bg{position:absolute;z-index:0;pointer-events:none}
+  .hp-bgpage .hp-body{position:relative;z-index:1}
   .hp-tbl{border-collapse:collapse;table-layout:fixed;margin:8px 0;max-width:100%}
   .hp-tbl td{vertical-align:middle;padding:2px 5px;word-break:break-word;overflow-wrap:anywhere}
   .hp-tbl.hp-nested{margin:3px 0;width:100%}
   .hp-ln{min-height:1em}
-  .hp-img{margin:4px 0}
+  /* 머리말/꼬리말(쪽번호 등)은 페이지 상/하단 실제 좌표에 고정(흐름과 무관). */
+  .hp-hf{position:absolute;z-index:2;white-space:nowrap}
+  /* 이미지는 inline-block 으로 — 같은 줄에 들어가면 옆으로, 넘치면 아래로(원본의 가로/세로 배치 근사). */
+  .hp-img{display:inline-block;vertical-align:top;margin:4px 6px 4px 0}
   .hp-img img{display:block}
 </style></head><body>${pages.join("\n")}</body></html>`;
 }
