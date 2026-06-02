@@ -689,12 +689,27 @@ export interface CellStyle {
   fVertRestart?: boolean;
 }
 
+/** 표 수준(TAP) 테두리. 셀에 개별 brc 가 없을 때의 폴백.
+ *  바깥 4변 + 내부 격자선(insideH=행 사이 가로, insideV=열 사이 세로). */
+export interface TableBorders {
+  top?: CellBorder;
+  left?: CellBorder;
+  bottom?: CellBorder;
+  right?: CellBorder;
+  insideH?: CellBorder;
+  insideV?: CellBorder;
+}
+
 /** 한 행(TTP)의 표 정의. */
 export interface TableDef {
   /** 열 수. */
   itcMac: number;
   /** 셀별 시각 속성(길이 = itcMac). */
   cells: CellStyle[];
+  /** 셀 경계 x좌표(twips, 길이 = itcMac+1). 행마다 열 경계가 달라도 정렬하는 데 쓴다. */
+  edges?: number[];
+  /** 표 수준 테두리(sprmTTableBorders). 셀 brc 가 없는 변의 폴백. */
+  tableBorders?: TableBorders;
 }
 
 /** brcType → CSS border-style. 0/없음 → "none"(투명). */
@@ -726,6 +741,56 @@ function decodeBrc80(gp: Uint8Array, off: number): CellBorder | undefined {
   const style = brcStyle(brcType);
   if (style === "none" || dptLineWidth === 0) return undefined;
   return { style, widthPt: dptLineWidth / 8, color: ICO_COLORS[ico] ?? "#000000" };
+}
+
+/** 새 Brc(8바이트): cv(4)+dptLineWidth(1)+brcType(1)+flags(2) → CellBorder. 없으면 undefined. */
+function decodeBrc(gp: Uint8Array, off: number): CellBorder | undefined {
+  if (off + 8 > gp.length) return undefined;
+  const dv = new DataView(gp.buffer, gp.byteOffset, gp.byteLength);
+  const cv = dv.getUint32(off, true);
+  const dptLineWidth = gp[off + 4]!;
+  const brcType = gp[off + 5]!;
+  const style = brcStyle(brcType);
+  if (style === "none" || dptLineWidth === 0) return undefined;
+  return { style, widthPt: dptLineWidth / 8, color: cvColor(cv) ?? "#000000" };
+}
+
+/**
+ * PAPX(행끝 TTP) grpprl 에서 표 수준 테두리를 파싱.
+ *   - sprmTTableBorders(0xD61A): operand = cb(1) + 6×Brc(8B).
+ *   - sprmTTableBorders80(0xD613): operand = cb(1) + 6×Brc80(4B).
+ *   순서(둘 다): top, left, bottom, right, insideH, insideV.
+ */
+function parseTableBorders(grpprl: Uint8Array): TableBorders | undefined {
+  let tb: TableBorders | undefined;
+  const bNew = findSprmOperand(grpprl, 0xd61a);
+  if (bNew) {
+    const b = bNew.at + 1; // cb 바이트 다음부터 rgbrc
+    tb = {
+      top: decodeBrc(grpprl, b),
+      left: decodeBrc(grpprl, b + 8),
+      bottom: decodeBrc(grpprl, b + 16),
+      right: decodeBrc(grpprl, b + 24),
+      insideH: decodeBrc(grpprl, b + 32),
+      insideV: decodeBrc(grpprl, b + 40),
+    };
+  } else {
+    const b80 = findSprmOperand(grpprl, 0xd613);
+    if (b80) {
+      const b = b80.at + 1;
+      tb = {
+        top: decodeBrc80(grpprl, b),
+        left: decodeBrc80(grpprl, b + 4),
+        bottom: decodeBrc80(grpprl, b + 8),
+        right: decodeBrc80(grpprl, b + 12),
+        insideH: decodeBrc80(grpprl, b + 16),
+        insideV: decodeBrc80(grpprl, b + 20),
+      };
+    }
+  }
+  if (!tb) return undefined;
+  if (!tb.top && !tb.left && !tb.bottom && !tb.right && !tb.insideH && !tb.insideV) return undefined;
+  return tb;
 }
 
 /** Word COLORREF(cv, 0x00BBGGRR) → "#rrggbb". 상위 바이트(0xFF)=auto → undefined. */
@@ -765,8 +830,16 @@ export function parseTableDef(grpprl: Uint8Array): TableDef | null {
   // operand: [cb(2)][itcMac(1)][rgdxaCenter][rgTc80]
   const itcMac = grpprl[def.at + 2] ?? 0;
   if (itcMac <= 0 || itcMac > 64) return null;
-  const tcBase = def.at + 3 + (itcMac + 1) * 2;
+  const dxaBase = def.at + 3;
+  const tcBase = dxaBase + (itcMac + 1) * 2;
   const dvg = new DataView(grpprl.buffer, grpprl.byteOffset, grpprl.byteLength);
+  // rgdxaCenter: 셀 경계 x좌표(twips) itcMac+1 개. 행마다 열 경계가 달라도 좌표로 정렬한다.
+  const edges: number[] = [];
+  for (let c = 0; c <= itcMac; c++) {
+    const o = dxaBase + c * 2;
+    if (o + 2 > grpprl.length) break;
+    edges.push(dvg.getInt16(o, true));
+  }
   const cells: CellStyle[] = [];
   for (let c = 0; c < itcMac; c++) {
     const o = tcBase + c * 20;
@@ -800,7 +873,13 @@ export function parseTableDef(grpprl: Uint8Array): TableDef | null {
       if (fill) cells[c]!.fill = fill;
     }
   }
-  return cells.length ? { itcMac, cells } : null;
+  if (!cells.length) return null;
+  return {
+    itcMac,
+    cells,
+    edges: edges.length === itcMac + 1 ? edges : undefined,
+    tableBorders: parseTableBorders(grpprl),
+  };
 }
 
 /** 행끝 마크 FC 의 표 정의(없으면 null). */

@@ -141,6 +141,7 @@ function colorOf(clr: XmlNode | undefined, theme: Record<string, string>): strin
   }
   if (!hex || hex.length < 6) return undefined;
   let r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+  let alpha = 1;
   for (const mod of childrenOf(clr)) {
     const t = tagOf(mod);
     const val = Number(attrOf(mod, "val")) / 100000;
@@ -149,7 +150,9 @@ function colorOf(clr: XmlNode | undefined, theme: Record<string, string>): strin
     else if (t === "a:lumOff") { r += 255 * val; g += 255 * val; b += 255 * val; }
     else if (t === "a:shade") { r *= val; g *= val; b *= val; }
     else if (t === "a:tint") { r = r * val + 255 * (1 - val); g = g * val + 255 * (1 - val); b = b * val + 255 * (1 - val); }
+    else if (t === "a:alpha") alpha = val; // 투명도(불투명도): 1=불투명, 0=완전투명
   }
+  if (alpha < 1) return `rgba(${clamp(r)},${clamp(g)},${clamp(b)},${Math.max(0, alpha).toFixed(3)})`;
   const to2 = (v: number) => clamp(v).toString(16).padStart(2, "0");
   return "#" + (to2(r) + to2(g) + to2(b)).toUpperCase();
 }
@@ -187,7 +190,26 @@ function lighten(hex: string, t: number): string {
   return "#" + to2(mix(ch(0))) + to2(mix(ch(2))) + to2(mix(ch(4)));
 }
 
-interface RunStyle { sizePt?: number; bold?: boolean; italic?: boolean; underline?: boolean; color?: string }
+interface RunStyle { sizePt?: number; bold?: boolean; italic?: boolean; underline?: boolean; color?: string; font?: string }
+
+// 글꼴명에 명조/serif 계열이면 serif 폴백, 아니면 sans-serif. (HY신명조 등이 고딕처럼 보이는 것 방지)
+const SERIF_RE = /명조|바탕|batang|myeongjo|궁서|gungsuh|serif|times|cambria|georgia|garamond/i;
+/** a:rPr 의 a:latin/a:ea typeface → CSS font-family 스택(라틴·한글 폰트 + 일반 폴백). +mn/+mj 테마토큰은 생략. */
+function fontFamilyCss(rPr: XmlNode): string | undefined {
+  const names: string[] = [];
+  for (const tag of ["a:latin", "a:ea"]) {
+    const n = findChild(childrenOf(rPr), tag);
+    const tf = n ? attrOf(n, "typeface") : undefined;
+    if (tf && tf.trim() && !tf.startsWith("+")) names.push(tf.trim());
+  }
+  const uniq = [...new Set(names)];
+  if (!uniq.length) return undefined;
+  // 원본 폰트가 OS 에 없을 때 한글이 깨지지 않게 macOS/Win/웹 한글 폰트로 폴백(명조/고딕 구분 유지).
+  const fallback = uniq.some((n) => SERIF_RE.test(n))
+    ? "'AppleMyungjo','Batang','Noto Serif KR',serif"
+    : "'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif";
+  return uniq.map((n) => `'${n.replace(/'/g, "")}'`).join(",") + "," + fallback;
+}
 interface Bullet { kind: "char" | "num" | "none"; char?: string; font?: string }
 interface LvlStyle { algn?: string; marL?: number; indent?: number; bullet?: Bullet; rPr: RunStyle }
 type LvlStyles = LvlStyle[]; // index = level(0-based)
@@ -205,6 +227,8 @@ function readRunStyle(rPr: XmlNode | undefined, theme: Record<string, string>): 
   if (u && u !== "none") s.underline = true;
   const color = colorFromFill(findChild(childrenOf(rPr), "a:solidFill"), theme);
   if (color) s.color = color;
+  const font = fontFamilyCss(rPr);
+  if (font) s.font = font;
   return s;
 }
 function readLvlPr(pPr: XmlNode | undefined, theme: Record<string, string>): LvlStyle {
@@ -293,6 +317,7 @@ function mergeLvl(a: LvlStyle, b: LvlStyle): LvlStyle {
 function runStyleCss(s: RunStyle): string {
   const d: string[] = [];
   if (s.sizePt) d.push(`font-size:${s.sizePt}pt`);
+  if (s.font) d.push(`font-family:${s.font}`);
   if (s.bold) d.push("font-weight:bold");
   if (s.italic) d.push("font-style:italic");
   if (s.underline) d.push("text-decoration:underline");
@@ -301,7 +326,9 @@ function runStyleCss(s: RunStyle): string {
 }
 
 /** layers = 상속 레이어(낮은→높은 우선순위). dropColor=true 면 상속 글자색 무시(표 셀). */
-function renderTextBody(node: XmlNode, layers: LvlStyles[], theme: Record<string, string>, dropColor = false): string {
+function renderTextBody(node: XmlNode, layers: LvlStyles[], theme: Record<string, string>, dropColor = false, fontScale = 1): string {
+  const scaleSz = (r: RunStyle): RunStyle =>
+    fontScale !== 1 && r.sizePt ? { ...r, sizePt: Math.round(r.sizePt * fontScale * 10) / 10 } : r;
   const tx = findChild(childrenOf(node), "p:txBody") ?? findChild(childrenOf(node), "a:txBody");
   if (!tx) return "";
   const txKids = childrenOf(tx);
@@ -323,7 +350,7 @@ function renderTextBody(node: XmlNode, layers: LvlStyles[], theme: Record<string
       if (tag === "a:r") {
         const text = esc(deepText(findChild(childrenOf(n), "a:t") ?? {}));
         if (!text) continue;
-        const css = runStyleCss(mergeRun(eff.rPr, readRunStyle(findChild(childrenOf(n), "a:rPr"), theme)));
+        const css = runStyleCss(scaleSz(mergeRun(eff.rPr, readRunStyle(findChild(childrenOf(n), "a:rPr"), theme))));
         inner += css ? `<span style="${css}">${text}</span>` : text;
       } else if (tag === "a:br") inner += "<br/>";
       else if (tag === "a:fld") inner += esc(deepText(findChild(childrenOf(n), "a:t") ?? {}));
@@ -346,7 +373,8 @@ function renderTextBody(node: XmlNode, layers: LvlStyles[], theme: Record<string
     // 박스를 넘쳐 잘리던 문제 해결. **endParaRPr 우선**(문단끝 마크가 빈 줄 높이를 정의),
     // 없으면 상속 defRPr. 런이 있는 줄은 런 span 이 제 크기로 덮으므로 안전.
     const endPr = findChild(childrenOf(p), "a:endParaRPr");
-    const pSize = readRunStyle(endPr, theme).sizePt ?? eff.rPr.sizePt;
+    const pSizeRaw = readRunStyle(endPr, theme).sizePt ?? eff.rPr.sizePt;
+    const pSize = pSizeRaw ? scaleSz({ sizePt: pSizeRaw }).sizePt : undefined;
     if (pSize) d.push(`font-size:${pSize}pt`);
     // 줄간격: a:lnSpc(spcPct 비율 또는 spcPts 고정pt) 반영(무시하면 너무 성겨 넘침).
     const lnSpc = pPr ? findChild(childrenOf(pPr), "a:lnSpc") : undefined;
@@ -453,6 +481,10 @@ function renderTbl(frame: XmlNode, theme: Record<string, string>, tableStyles: M
       if (bg) d.push(`background-color:${bg}`);
       if (part?.color) d.push(`color:${part.color}`);
       if (part?.bold) d.push("font-weight:bold");
+      // 셀 세로 정렬: a:tcPr anchor(ctr/b). 기본은 top(CSS). 미반영 시 여러 줄 셀과 한 줄 셀이 어긋나 보임.
+      const cellAnchor = tcPr ? attrOf(tcPr, "anchor") : undefined;
+      if (cellAnchor === "ctr") d.push("vertical-align:middle");
+      else if (cellAnchor === "b") d.push("vertical-align:bottom");
       // 셀 테두리: a:tcPr 의 lnL/lnR/lnT/lnB 를 그대로 반영. 하나라도 정의돼 있으면
       // 미정의 변은 테두리 없음(PowerPoint 기본)으로 둬 기본 1px 격자를 덮는다.
       const kidsTc = tcPr ? childrenOf(tcPr) : [];
@@ -471,6 +503,19 @@ function renderTbl(frame: XmlNode, theme: Record<string, string>, tableStyles: M
 
 // ── 그림 ───────────────────────────────────────────────────────────────────────
 
+/** a:srcRect(l/t/r/b, 1000분율 %) 크롭 → 보이는 부분만 프레임을 채우도록 img 확대·이동 스타일. */
+function imgStyle(node: XmlNode): string {
+  const sr = findDeep([node], "a:srcRect");
+  if (sr) {
+    const f = (k: string): number => { const v = Number(attrOf(sr, k)); return Number.isFinite(v) ? v / 100000 : 0; };
+    const l = f("l"), t = f("t"), r = f("r"), b = f("b");
+    const fw = Math.max(0.01, 1 - l - r), fh = Math.max(0.01, 1 - t - b);
+    return `position:absolute;width:${(100 / fw).toFixed(2)}%;height:${(100 / fh).toFixed(2)}%;` +
+      `left:${(-l / fw * 100).toFixed(2)}%;top:${(-t / fh * 100).toFixed(2)}%;object-fit:fill`;
+  }
+  // PowerPoint 는 그림을 프레임에 꽉 채운다(stretch). contain(레터박스)이면 작게·치우쳐 보임.
+  return "width:100%;height:100%;object-fit:fill";
+}
 function renderPic(node: XmlNode, parts: Record<string, Uint8Array>, slidePath: string, rels: Rels): string {
   const blip = findDeep([node], "a:blip");
   const embed = blip ? attrOf(blip, "r:embed") : undefined;
@@ -480,11 +525,12 @@ function renderPic(node: XmlNode, parts: Record<string, Uint8Array>, slidePath: 
   const buf = parts[mediaPath];
   const ext = (mediaPath.split(".").pop() ?? "").toLowerCase();
   const mime = IMG_MIME[ext];
-  if (buf && mime) return `<img src="data:${mime};base64,${bytesToBase64(buf)}" style="width:100%;height:100%;object-fit:contain" alt=""/>`;
+  const st = imgStyle(node);
+  if (buf && mime) return `<img src="data:${mime};base64,${bytesToBase64(buf)}" style="${st}" alt=""/>`;
   // TIFF 는 브라우저가 못 그리므로 PNG 로 디코드(LZW/Deflate/PackBits/None).
   if (buf && (ext === "tif" || ext === "tiff")) {
     const uri = tiffToPngDataUri(buf);
-    if (uri) return `<img src="${uri}" style="width:100%;height:100%;object-fit:contain" alt=""/>`;
+    if (uri) return `<img src="${uri}" style="${st}" alt=""/>`;
   }
   return `<div class="pptx-ph-img">🖼<br/><small>${ext.toUpperCase()} 미표시</small></div>`;
 }
@@ -718,11 +764,29 @@ interface SlideCtx {
   tableStyles: Map<string, TblStyle>;
 }
 
-function renderShape(node: XmlNode, ctx: SlideCtx, xf: XF = ROOT_XF): string {
+// a:bodyPr 텍스트 인셋(EMU→px). 속성 없으면 PowerPoint 기본(좌우 0.1in, 상하 0.05in).
+function bodyInsets(bodyPr: XmlNode | undefined): { l: number; t: number; r: number; b: number } {
+  const g = (k: string, d: number): number => {
+    const v = bodyPr ? attrOf(bodyPr, k) : undefined;
+    const n = Number(v);
+    return v != null && Number.isFinite(n) ? px(n) : px(d);
+  };
+  return { l: g("lIns", 91440), t: g("tIns", 45720), r: g("rIns", 91440), b: g("bIns", 45720) };
+}
+// a:normAutofit fontScale(1000분율 %, 예 90000=0.9). 없으면 1. PowerPoint 가 미리 계산해 저장한 축소율.
+function autofitScale(bodyPr: XmlNode | undefined): number {
+  const naf = bodyPr ? findChild(childrenOf(bodyPr), "a:normAutofit") : undefined;
+  const v = naf ? Number(attrOf(naf, "fontScale")) : NaN;
+  return Number.isFinite(v) && v > 0 ? v / 100000 : 1;
+}
+
+function renderShape(node: XmlNode, ctx: SlideCtx, xf: XF = ROOT_XF, groupFill?: string): string {
   const tag = tagOf(node);
   if (tag === "p:grpSp") {
     const cxf = groupXF(xf, node);
-    const inner = childrenOf(node).map((c) => renderShape(c, ctx, cxf)).join("");
+    // 그룹 채우기 — 자식의 a:grpFill 이 이 색을 상속한다(중첩 그룹은 상위 그룹 색으로 폴백).
+    const gFill = fillColorOf(findChild(childrenOf(node), "p:grpSpPr"), ctx.theme) ?? groupFill;
+    const inner = childrenOf(node).map((c) => renderShape(c, ctx, cxf, gFill)).join("");
     // 그룹 전체 회전: 자식은 슬라이드좌표에 평탄화돼 있으니, 그룹중심 기준으로 통째 회전하는
     // 래퍼(슬라이드 전체크기, origin=그룹중심)로 감싼다. 중첩그룹도 같은 좌표라 회전이 합성된다.
     const rot = rotOf(node);
@@ -740,7 +804,10 @@ function renderShape(node: XmlNode, ctx: SlideCtx, xf: XF = ROOT_XF): string {
   if (tag === "p:cxnSp" && box) return renderConnector(node, box, ctx.theme);
   if (tag === "p:sp" || tag === "p:cxnSp") {
     const spPr = findChild(childrenOf(node), "p:spPr");
-    const fill = fillColorOf(spPr, ctx.theme) ?? refColor(node, "a:fillRef", ctx.theme);
+    // a:grpFill 이면 부모 그룹 채우기를 상속(없으면 직접 채우기 → 스타일 fillRef 순).
+    const fill = (spPr && findChild(childrenOf(spPr), "a:grpFill"))
+      ? groupFill
+      : fillColorOf(spPr, ctx.theme) ?? refColor(node, "a:fillRef", ctx.theme);
     const lnNode = spPr ? findChild(childrenOf(spPr), "a:ln") : undefined;
     let border = lnCss(lnNode, ctx.theme);
     if (border === undefined && !lnNode) { const lr = refColor(node, "a:lnRef", ctx.theme); if (lr) border = `1px solid ${lr}`; }
@@ -751,17 +818,30 @@ function renderShape(node: XmlNode, ctx: SlideCtx, xf: XF = ROOT_XF): string {
     const layers: LvlStyles[] = [ctx.txStyles[styleCategory(node)]];
     const mPh = phLayer(ctx.masterLst, ph); if (mPh) layers.push(mPh);
     const lPh = phLayer(ctx.layoutLst, ph); if (lPh) layers.push(lPh);
-    const body = renderTextBody(node, layers, ctx.theme);
+    // a:bodyPr — 텍스트 인셋(lIns/tIns/rIns/bIns)·세로정렬(anchor)·자동맞춤(normAutofit).
+    // 인셋을 박스 padding 으로 줘야 텍스트가 PowerPoint 처럼 안쪽에서 시작·줄바꿈한다(미적용 시 좌·상 ~10px 밀림).
+    const bodyPr = findDeep([node], "a:bodyPr");
+    const ins = bodyInsets(bodyPr);
+    const fontScale = autofitScale(bodyPr);
+    const body = renderTextBody(node, layers, ctx.theme, false, fontScale);
 
     const hasFill = !!fill && fill !== "none";
     if (!body && !hasFill && !border) return "";
     // 세로 정렬: a:bodyPr anchor(t/ctr/b)
-    const bodyPr = findDeep([node], "a:bodyPr");
     const anchor = bodyPr ? attrOf(bodyPr, "anchor") : undefined;
     const justify = anchor === "ctr" ? "center" : anchor === "b" ? "flex-end" : "flex-start";
     const rot = rotOf(node);
     const shadow = shadowCss(node, ctx.theme);
-    const d = [pos, "display:flex", "flex-direction:column", `justify-content:${justify}`];
+    // 자동맞춤 종류별 박스 크기·넘침 처리:
+    //   spAutoFit(박스가 글자에 맞춰 커짐) → 고정높이 대신 min-height 로 아래로 자라게(채우기/테두리도 함께).
+    //   normAutofit(글자 줄여 맞춤) → 고정높이 + 클립.
+    //   noAutofit(기본) → 고정높이지만 넘쳐도 그대로 보임(PowerPoint 동작) → overflow:visible.
+    const norm = !!(bodyPr && findChild(childrenOf(bodyPr), "a:normAutofit"));
+    const spAuto = !!(bodyPr && findChild(childrenOf(bodyPr), "a:spAutoFit"));
+    const boxPos = spAuto && box ? pos.replace(`height:${box.h}px`, `min-height:${box.h}px`) : pos;
+    const d = [boxPos, "display:flex", "flex-direction:column", `justify-content:${justify}`,
+      `padding:${ins.t}px ${ins.r}px ${ins.b}px ${ins.l}px`];
+    d.push(`overflow:${norm ? "hidden" : "visible"}`);
     if (hasFill) d.push(`background:${fill}`);
     if (border) d.push(`border:${border}`);
     if (shapeCss) d.push(shapeCss);
@@ -826,7 +906,7 @@ export function pptxToPreviewHtml(bytes: Uint8Array, opts: PreviewOptions = {}):
   .pptx-stage { position:relative; margin:0 auto 26px; width:100%; }
   .pptx-slide { position:relative; background:#fff; overflow:hidden; transform-origin:top left;
     box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.10); }
-  .pptx-sp { overflow:hidden; line-height:1.25; box-sizing:border-box; }
+  .pptx-sp { line-height:1.25; box-sizing:border-box; }
   .pptx-sp p { margin:0; }
   .pptx-bul { margin-right:.4em; }
   .pptx-pic { overflow:hidden; }

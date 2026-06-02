@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { docAdapter, docToPreviewHtml } from "../src/formats/doc.js";
 import { writeCfb, buildCfbModel, readCfb } from "../src/core/cfb.js";
+import { parseTableDef } from "../src/formats/doc-format.js";
 
 // ── 최소 .doc(Word 97-2003) CFB 빌더 ─────────────────────────────────────────
 //
@@ -105,5 +106,66 @@ describe("doc 미리보기(FIB + CLX piece table 파싱)", () => {
     const doc = buildDoc("X\r");
     const cfb = readCfb(doc);
     expect(cfb.streams["1Table"]).toBeDefined();
+  });
+});
+
+describe("doc 표 테두리(셀 brc 없이 표 수준 테두리만)", () => {
+  // 셀별 TC80 brc 가 전부 0(none)이고, 격자선은 sprmTTableBorders80(0xD613)에만
+  // 들어있는 표 — Word 가 흔히 쓰는 저장 방식. 이 경우 격자선이 사라지면 안 된다.
+  /** Brc80 4B: [dptLineWidth][brcType][ico][flags]. */
+  const brc = (w: number, t = 1, ico = 0) => [w, t, ico, 0];
+
+  function buildRowGrpprl(itcMac: number, edgesTwips?: number[]): Uint8Array {
+    // sprmTDefTable(0xD608): [cb:2][itcMac:1][rgdxaCenter:(itcMac+1)*2][rgTc80:itcMac*20]
+    const e = edgesTwips ?? new Array(itcMac + 1).fill(0);
+    const rgdxa: number[] = [];
+    for (const v of e) rgdxa.push(v & 0xff, (v >> 8) & 0xff); // int16 LE
+    const rgtc = new Array(itcMac * 20).fill(0); // 셀별 brc 전부 0 = none
+    const defBody = [itcMac, ...rgdxa, ...rgtc];
+    const cb = defBody.length + 1; // operandLen(0xD608) = 2 + (cb-1)
+    const defOperand = [cb & 0xff, (cb >> 8) & 0xff, ...defBody];
+    // sprmTTableBorders80(0xD613): [cb=24][top,left,bottom,right,insideH,insideV]
+    const tbOperand = [24, ...brc(8), ...brc(8), ...brc(8), ...brc(8), ...brc(4), ...brc(4)];
+    return new Uint8Array([0x08, 0xd6, ...defOperand, 0x13, 0xd6, ...tbOperand]);
+  }
+
+  it("셀 brc 가 없어도 표 수준 테두리(insideH/insideV 포함)를 파싱한다", () => {
+    const def = parseTableDef(buildRowGrpprl(2));
+    expect(def).not.toBeNull();
+    expect(def!.itcMac).toBe(2);
+    // 셀별 brc 는 비어있다(none).
+    expect(def!.cells[0]!.top).toBeUndefined();
+    expect(def!.cells[0]!.left).toBeUndefined();
+    // 표 수준 테두리에서 격자선(insideH/insideV)이 복원된다.
+    expect(def!.tableBorders).toBeDefined();
+    expect(def!.tableBorders!.insideH?.style).toBe("solid");
+    expect(def!.tableBorders!.insideV?.style).toBe("solid");
+    expect(def!.tableBorders!.top?.style).toBe("solid");
+    expect(def!.tableBorders!.insideH?.widthPt).toBeCloseTo(0.5);
+    expect(def!.tableBorders!.top?.widthPt).toBeCloseTo(1);
+  });
+
+  it("rgdxaCenter(셀 경계 좌표)를 edges 로 파싱한다", () => {
+    const def = parseTableDef(buildRowGrpprl(6, [0, 1845, 3833, 4938, 6069, 7496, 9637]));
+    expect(def!.edges).toEqual([0, 1845, 3833, 4938, 6069, 7496, 9637]);
+  });
+});
+
+describe("doc 표 정렬(행마다 열 경계가 달라도 좌표로 맞춤)", () => {
+  // sample.doc 안에는 'Item' 셀 아래 들여쓴 하위 행(7칸)이 헤더(6칸)와 섞인 표가 있다.
+  // 좌표 기반 통합 그리드가 없으면 하위 행이 한 칸씩 밀려 오른쪽으로 삐져나간다.
+  it("중첩 들여쓰기 행이 헤더 열과 정렬된다(colgroup + 선행 colspan)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const path = fileURLToPath(new URL("./fixtures/sample.doc", import.meta.url));
+    const bytes = new Uint8Array(readFileSync(path));
+    const html = docToPreviewHtml(bytes);
+    const tables = html.match(/<table[\s\S]*?<\/table>/g) ?? [];
+    const t = tables.find((x) => x.includes("locdate"));
+    expect(t).toBeDefined();
+    // 통합 그리드 → <colgroup> 으로 열 폭 고정.
+    expect(t!).toContain("<colgroup>");
+    // 6칸 행의 선행 셀이 좁은 들여쓰기 열을 흡수 → colspan 으로 정렬.
+    expect(t!).toMatch(/colspan="2"/);
   });
 });
