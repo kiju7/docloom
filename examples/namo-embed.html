@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>docloom 임베드 — 미리보기 · 편집 · 복원</title>
+<!--
+  ╔══════════════════════════════════════════════════════════════════════════╗
+  ║  docloom 드롭인 임베드 (namo.site 용) — AI 프록시 미사용                    ║
+  ║                                                                            ║
+  ║  파일 열기 → 미리보기 ⇄ 직접편집(내용 수정) → 원본 포맷으로 복원 다운로드.   ║
+  ║  hwp/hwpx 는 rhwp(WASM), 그 외(docx·pptx·xlsx·doc·csv·txt·html…)는 docloom  ║
+  ║  코어로 **자동 분기**(createDocloomWeb 가 처리).                             ║
+  ║                                                                            ║
+  ║  ▶ AI 편집을 붙이려면: editable(현재 편집 HTML)을 원하는 LLM 으로 고친 뒤    ║
+  ║    setEditable(newHtml) 만 호출하면 미리보기·복원에 그대로 반영된다.         ║
+  ║    (data-h/data-hc/data-hf 등 앵커·구조는 유지하고 텍스트만 고칠 것)         ║
+  ╚══════════════════════════════════════════════════════════════════════════╝
+-->
+<style>
+  :root { --accent:#5b6cff; --line:#e3e7f0; --fg:#1c2233; --muted:#6b748c; --bg:#f4f6fb; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { font-family:-apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif; color:var(--fg);
+    background:var(--bg); display:flex; flex-direction:column; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); background:#fff; display:flex; align-items:center; gap:10px; }
+  header b { font-size:15px; } header .fmt { font-size:11px; color:var(--muted); }
+  .sp { margin-left:auto; display:flex; gap:8px; }
+  .btn { height:32px; padding:0 14px; border-radius:8px; border:1px solid var(--line); background:#fff;
+    color:var(--accent); font-weight:700; font-size:13px; cursor:pointer; }
+  .btn[disabled] { color:#aab; cursor:not-allowed; }
+  .btn.primary { background:var(--accent); color:#fff; border-color:transparent; }
+  main { flex:1; min-height:0; position:relative; }
+  /* 드롭존 */
+  #drop { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column;
+    gap:10px; color:var(--muted); cursor:pointer; text-align:center; padding:24px; background:#eceef0; }
+  #drop.hide { display:none; } #drop .big { font-size:42px; } #drop b { color:var(--accent); }
+  #drop.drag { background:#eef0ff; }
+  /* 미리보기 */
+  #frame { width:100%; height:100%; border:0; background:#eceef0; display:none; }
+  /* 편집기(contenteditable) */
+  #editor { width:100%; height:100%; overflow:auto; padding:24px 0; background:#eceef0; outline:0; display:none; }
+
+  /* ── 편집 화면용 CSS (docloom 편집 HTML 이 제대로 보이게) ───────────────────── */
+  /* 공통: 흰 종이 시트 */
+  #editor .hwp-edit, #editor .docloom-doc {
+    max-width:820px; margin:0 auto; background:#fff; padding:40px 48px; box-sizing:border-box;
+    box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.08); line-height:1.6;
+  }
+  /* 표 */
+  #editor table { border-collapse:collapse; max-width:100%; margin:8px 0; }
+  #editor td, #editor th { border:1px solid #c9ccd1; padding:4px 8px; vertical-align:middle; word-break:break-word; }
+  /* 한글 페이지 구분선 */
+  #editor .hwp-pagebreak { text-align:center; color:#aab1bb; font-size:11px; user-select:none;
+    margin:20px -48px 16px; border-top:1px dashed #c7ccd3; padding-top:5px; }
+  /* 한글 머리말/꼬리말 박스 */
+  #editor .hwp-hf { border:1px dashed #c7ccd3; border-radius:6px; background:#fafbfc; padding:6px 12px 8px; margin:0 0 16px; }
+  #editor .hwp-hf[data-hf-kind="footer"] { margin:18px 0 0; }
+  #editor .hwp-hf-label { display:block; font-size:10px; color:#9aa1ab; user-select:none; margin-bottom:2px; }
+  /* frozen(개체·서식) 자리표시 */
+  #editor .s-frozen { border:1px dashed #b0b4ba; border-radius:6px; padding:8px 10px; margin:10px 0;
+    color:#6b7280; font-size:13px; background:#fafbfc; }
+  .hintbar { padding:8px 14px; font-size:12px; color:var(--muted); border-top:1px solid var(--line); background:#fafbfd; }
+</style>
+</head>
+<body>
+  <header>
+    <b>docloom</b><span class="fmt" id="fmtBadge">파일을 열어주세요</span>
+    <div class="sp">
+      <input type="file" id="file" hidden />
+      <button class="btn" id="openBtn">📂 파일 열기</button>
+      <button class="btn" id="editBtn" disabled>✏️ 편집</button>
+      <button class="btn" id="previewBtn" style="display:none">👁 미리보기</button>
+      <button class="btn primary" id="dlBtn" disabled>⬇ 복원 다운로드</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="drop">
+      <div class="big">📄</div>
+      <div><b>여기로 파일을 끌어다 놓거나</b> 클릭해서 선택</div>
+      <div style="font-size:12px">docx·pptx·xlsx·doc·csv·txt·html·hwp·hwpx·pdf — 변환 미리보기 후 편집·복원</div>
+    </div>
+    <iframe id="frame" title="미리보기"></iframe>
+    <div id="editor" contenteditable="true" spellcheck="false"></div>
+  </main>
+  <div class="hintbar" id="hint">— 파일을 열면 미리보기가 표시됩니다.</div>
+
+<script type="module">
+  // ── CONFIG (보통 그대로 둠) ─────────────────────────────────────────────────
+  const CONFIG = {
+    BUNDLE: "https://kiju7.github.io/docloom",
+    BUNDLE_VER: "20260604b",      // docloom-web.mjs 캐시버스터
+    RHWP_VER: "20260602fixes",    // rhwp.js / rhwp_bg.wasm 캐시버스터
+  };
+
+  // ── docloom 통합 래퍼 로드 (hwp/그외 자동 분기) ─────────────────────────────
+  const rhwp = await import(`${CONFIG.BUNDLE}/rhwp.js?v=${CONFIG.RHWP_VER}`);
+  const { createDocloomWeb } = await import(`${CONFIG.BUNDLE}/docloom-web.mjs?v=${CONFIG.BUNDLE_VER}`);
+  const dl = createDocloomWeb({
+    rhwpInit: rhwp.default,
+    HwpDocument: rhwp.HwpDocument,
+    wasmUrl: `${CONFIG.BUNDLE}/rhwp_bg.wasm?v=${CONFIG.RHWP_VER}`,
+  });
+
+  // ── 상태 ────────────────────────────────────────────────────────────────────
+  let session = null;     // dl.open() 결과(복원까지 유지 — 내부에 hwp 문서 보유)
+  let editable = null;    // 현재 편집 HTML
+  let fileName = "document";
+  let frameUrl = null;
+
+  const $ = (id) => document.getElementById(id);
+  const frame = $("frame"), editor = $("editor"), drop = $("drop"), fileInput = $("file");
+  const editBtn = $("editBtn"), previewBtn = $("previewBtn"), dlBtn = $("dlBtn");
+  const fmtBadge = $("fmtBadge"), hint = $("hint");
+
+  function setFrame(html) {
+    if (frameUrl) { URL.revokeObjectURL(frameUrl); frameUrl = null; }
+    frameUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+    frame.src = frameUrl;
+  }
+  function showPreview() {
+    drop.classList.add("hide"); editor.style.display = "none"; frame.style.display = "block";
+    editBtn.style.display = editable ? "inline-flex" : "none"; previewBtn.style.display = "none";
+  }
+  function showEditor() {
+    editor.innerHTML = editable; drop.classList.add("hide");
+    frame.style.display = "none"; editor.style.display = "block";
+    editBtn.style.display = "none"; previewBtn.style.display = "inline-flex";
+  }
+
+  // 외부(예: namo 의 AI)가 편집 HTML 을 교체할 때 호출 → 미리보기/복원에 반영.
+  // window.docloomEmbed.setEditable(newHtml) 으로도 접근 가능.
+  function setEditable(newHtml) {
+    if (!session) return;
+    editable = newHtml;
+    setFrame(dl.previewEdited(session, editable));
+    showPreview();
+  }
+  window.docloomEmbed = { get session(){ return session; }, get editable(){ return editable; }, setEditable };
+
+  // ── 파일 열기 ────────────────────────────────────────────────────────────────
+  async function handleFile(file) {
+    if (!file) return;
+    fileName = file.name.replace(/\.[^.]+$/, "");
+    fmtBadge.textContent = "변환 중…";
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      session = await dl.open(bytes, file.name);   // hwp/hwpx→rhwp, 그 외→코어 (자동)
+      editable = session.editable;
+      fmtBadge.textContent = `${session.fmt}${session.canRoundtrip ? "" : " · 미리보기 전용"}`;
+      setFrame(session.preview); showPreview();
+      const can = session.canRoundtrip && !!editable;
+      editBtn.disabled = !can; dlBtn.disabled = !can;
+      hint.textContent = can
+        ? "‘편집’에서 내용을 고친 뒤 ‘미리보기’로 확인 → ‘복원 다운로드’로 원본 포맷 저장."
+        : "이 포맷은 미리보기 전용이라 편집/복원이 비활성화됩니다.";
+    } catch (e) {
+      fmtBadge.textContent = "실패"; hint.textContent = "✗ 변환 실패: " + (e?.message ?? e);
+    }
+  }
+
+  // ── 복원 다운로드 ─────────────────────────────────────────────────────────────
+  function download() {
+    if (!session || !editable) return;
+    // 편집기에 있으면 최신 편집 내용을 반영.
+    if (editor.style.display !== "none") editable = editor.innerHTML;
+    try {
+      const { bytes, ext } = dl.restore(session, editable);  // hwp→.hwpx, 그 외→원본 확장자
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+      a.download = `${fileName}.${ext}`; a.click(); URL.revokeObjectURL(a.href);
+    } catch (e) { hint.textContent = "✗ 복원 실패: " + (e?.message ?? e); }
+  }
+
+  // ── 이벤트 ────────────────────────────────────────────────────────────────────
+  $("openBtn").onclick = () => fileInput.click();
+  drop.onclick = () => fileInput.click();
+  fileInput.onchange = () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); fileInput.value = ""; };
+  editBtn.onclick = () => showEditor();
+  previewBtn.onclick = () => { editable = editor.innerHTML; setFrame(dl.previewEdited(session, editable)); showPreview(); };
+  dlBtn.onclick = download;
+  ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("drag"); }));
+  ["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("drag"); }));
+  drop.addEventListener("drop", e => { const f = e.dataTransfer?.files?.[0]; if (f) handleFile(f); });
+  document.body.addEventListener("dragover", e => e.preventDefault());
+  document.body.addEventListener("drop", e => e.preventDefault());
+</script>
+</body>
+</html>
