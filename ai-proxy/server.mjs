@@ -15,14 +15,13 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
 
 const SYSTEM = [
-  "너는 한국어 문서 편집 도우미다. 입력으로 '편집채널 HTML' 과 사용자 요청을 받는다.",
+  "너는 한국어 문서 편집기다. 입력으로 '편집채널 HTML' 과 사용자 요청을 받는다.",
   "규칙:",
   "1) HTML 의 구조와 속성(class, data-pp, contenteditable, data-frozen 등)을 절대 바꾸지 마라.",
   '2) contenteditable="false" 이거나 class 에 s-frozen 이 있는 노드의 내용은 건드리지 마라.',
-  "3) 사용자가 요청한 텍스트 변경만 반영한다. 그 외 텍스트/태그는 그대로 둔다.",
-  "4) 출력은 반드시 아래 JSON 하나만. 다른 말/마크다운/코드펜스 금지.",
-  '   {"reply":"사용자에게 한국어로 한두 문장","html":"수정된 전체 HTML, 또는 변경이 없으면 null"}',
-  "5) 단순 질문(요약/설명 등 문서 변경이 불필요)이면 html 을 null 로 두고 reply 만 채운다.",
+  "3) 사용자가 요청한 텍스트 변경만 반영하고, 그 외 텍스트/태그는 그대로 둔다.",
+  "4) 출력은 '수정된 전체 HTML' 하나만. 설명·인사·마크다운·코드펜스(```)·JSON 금지.",
+  "5) 변경할 내용이 없으면(질문 등) 입력 HTML 을 한 글자도 안 바꾸고 그대로 다시 출력한다.",
 ].join("\n");
 
 const readBody = (req) =>
@@ -48,15 +47,12 @@ async function callClaude(messages, maxTokens = 8000) {
   return (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
 }
 
-// LLM 응답에서 JSON 한 덩이를 관대하게 추출(코드펜스/잡텍스트 방어).
-function parseJson(text) {
+// LLM 이 실수로 코드펜스(```html ... ```)로 감싸면 벗겨낸다. 그 외엔 그대로 HTML.
+function stripFence(text) {
   let t = (text || "").trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const fence = t.match(/```(?:html)?\s*([\s\S]*?)```/i);
   if (fence) t = fence[1].trim();
-  try { return JSON.parse(t); } catch {}
-  const s = t.indexOf("{"), e = t.lastIndexOf("}");
-  if (s >= 0 && e > s) { try { return JSON.parse(t.slice(s, e + 1)); } catch {} }
-  return { reply: text, html: null };
+  return t;
 }
 
 createServer(async (req, res) => {
@@ -77,10 +73,12 @@ createServer(async (req, res) => {
     const convo = history.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.text || "") }));
     convo.push({ role: "user", content: `편집채널 HTML:\n<<<HTML\n${html}\nHTML\n\n사용자 요청: ${instruction}` });
 
-    const out = parseJson(await callClaude(convo));
-    const changed = !!(out.html && typeof out.html === "string" && out.html.trim() && out.html.trim() !== "null");
+    // LLM 은 '수정된 전체 HTML' 만 낸다. reply/changed 는 프록시가 계산한다.
+    const editedHtml = stripFence(await callClaude(convo));
+    const changed = !!editedHtml && editedHtml.trim() !== String(html).trim();
+    const reply = changed ? "요청을 반영했어요." : "변경할 내용이 없어 문서를 그대로 두었어요.";
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ reply: out.reply || "처리했어요.", html: changed ? out.html : null, changed }));
+    res.end(JSON.stringify({ reply, html: changed ? editedHtml : null, changed }));
   } catch (e) {
     res.statusCode = 500;
     res.end(String(e?.message || e));
