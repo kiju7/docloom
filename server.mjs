@@ -23,51 +23,6 @@ const readBody = (req) =>
 // ALLOW_ORIGIN 환경변수로 특정 도메인만 열 수 있고, 미설정 시 전체(*) 허용.
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
-// ── AI 채팅 편집(/chat-edit) ────────────────────────────────────────────────
-// 문서 바이트 + 사용자 지시 → encode 로 '편집채널 HTML' 을 뽑고, Claude 가 그 HTML 의
-// 텍스트만 지시대로 고친 뒤 → decode 로 원본 포맷(양식 보존) 바이트로 되돌린다.
-// API 키는 서버 환경변수(ANTHROPIC_API_KEY)에만 두어 공개 페이지에 노출되지 않는다.
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-
-const CHAT_SYSTEM = [
-  "너는 한국어 문서 편집 도우미다. 입력으로 '편집채널 HTML' 과 사용자 요청을 받는다.",
-  "규칙:",
-  "1) HTML 의 구조와 속성(class, data-pp, contenteditable, data-frozen 등)을 절대 바꾸지 마라.",
-  "2) contenteditable=\"false\" 이거나 class 에 s-frozen 이 있는 노드의 내용은 건드리지 마라.",
-  "3) 사용자가 요청한 텍스트 변경만 반영한다. 그 외 텍스트는 그대로 둔다.",
-  "4) 출력은 반드시 아래 형태의 JSON 하나만. 다른 말/마크다운/코드펜스 금지.",
-  '   {"reply":"사용자에게 한국어로 한두 문장","html":"수정된 전체 HTML, 또는 변경이 없으면 null"}',
-  "5) 단순 질문(요약/설명)이라 문서 변경이 필요 없으면 html 을 null 로 두고 reply 만 채운다.",
-].join("\n");
-
-async function callClaude(systemText, messages, maxTokens = 8000) {
-  if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY 가 설정되지 않았습니다(Render 환경변수에 추가하세요).");
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemText, messages }),
-  });
-  if (!r.ok) throw new Error(`Anthropic API ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const data = await r.json();
-  return (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
-}
-
-// Claude 응답에서 JSON 한 덩이를 관대하게 추출(코드펜스/잡텍스트 방어).
-function parseChatJson(text) {
-  let t = text.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) t = fence[1].trim();
-  try { return JSON.parse(t); } catch {}
-  const s = t.indexOf("{"), e = t.lastIndexOf("}");
-  if (s >= 0 && e > s) { try { return JSON.parse(t.slice(s, e + 1)); } catch {} }
-  return { reply: text, html: null };
-}
-
 createServer(async (req, res) => {
   // 모든 응답에 CORS 헤더를 붙인다.
   res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
@@ -83,37 +38,9 @@ createServer(async (req, res) => {
   try {
     if (req.method !== "POST") {
       res.statusCode = 404;
-      return res.end("POST /preview | /encode | /decode | /chat-edit");
+      return res.end("POST /preview | /encode | /decode");
     }
     const body = await readBody(req);
-    if (req.url === "/chat-edit") {
-      // 입력 JSON: { doc: base64, format?, instruction, history?: [{role, text}] }
-      // 출력 JSON: { reply, doc: base64|null, changed }  (doc 는 변경됐을 때만 채움)
-      const { doc, format, instruction, history = [] } = JSON.parse(body.toString("utf8"));
-      const bytes = new Uint8Array(Buffer.from(doc, "base64"));
-      const { html, manifest } = encode(bytes, format ? { format } : undefined);
-
-      // 대화 맥락(과거 turn) + 현재 편집채널 HTML + 이번 지시.
-      const convo = history.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.text || "") }));
-      convo.push({
-        role: "user",
-        content:
-          `현재 편집채널 HTML:\n<<<HTML\n${html}\nHTML\n\n` +
-          `사용자 요청: ${instruction}`,
-      });
-
-      const raw = await callClaude(CHAT_SYSTEM, convo);
-      const out = parseChatJson(raw);
-
-      let docB64 = null, changed = false;
-      if (out.html && typeof out.html === "string" && out.html.trim() && out.html.trim() !== "null") {
-        const newBytes = decode(out.html, manifest, format ? { format } : undefined);
-        docB64 = Buffer.from(newBytes).toString("base64");
-        changed = true;
-      }
-      res.setHeader("content-type", "application/json");
-      return res.end(JSON.stringify({ reply: out.reply || "처리했어요.", doc: docB64, changed }));
-    }
     if (req.url === "/preview") {
       // 문서 바이트 → 미리보기 HTML
       res.setHeader("content-type", "text/html; charset=utf-8");
