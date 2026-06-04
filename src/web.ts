@@ -19,6 +19,7 @@ import {
   encode,
   decode,
   previewHtml,
+  toPreviewHtml,
   adapterFor,
   formatFromFilename,
   hwpToTreePreviewHtml,
@@ -55,6 +56,8 @@ export interface DocloomSession {
   // 내부 상태(직접 건드리지 말 것)
   _doc?: { exportHwpx(): Uint8Array } | null;
   _manifest?: Manifest | null;
+  _bytes?: Uint8Array;
+  _name?: string;
 }
 
 const isHwp = (fmt: string): boolean => fmt === "hwp" || fmt === "hwpx";
@@ -105,15 +108,30 @@ export function createDocloomWeb(deps: DocloomWebDeps = {}) {
         canRoundtrip: true,
         _doc: doc,
         _manifest: null,
+        _bytes: bytes,
+        _name: name,
       };
     }
 
     const preview = previewHtml(bytes, { title: name, format: hint });
     if (!canRoundtrip) {
-      return { fmt, preview, editable: null, canRoundtrip: false, _doc: null, _manifest: null };
+      return { fmt, preview, editable: null, canRoundtrip: false, _doc: null, _manifest: null, _bytes: bytes, _name: name };
     }
     const { html, manifest } = encode(bytes, { format: fmt as OfficeFormat });
-    return { fmt, preview, editable: html, canRoundtrip: true, _doc: null, _manifest: manifest };
+    return { fmt, preview, editable: html, canRoundtrip: true, _doc: null, _manifest: manifest, _bytes: bytes, _name: name };
+  }
+
+  /**
+   * 편집된 HTML → 갱신된 미리보기 HTML(수정 내용이 반영된 화면).
+   * hwp 는 문서에 반영 후 트리 렌더(멱등), 그 외는 편집 본문을 미리보기 셸에 감싼다.
+   */
+  function previewEdited(session: DocloomSession, editedHtml: string): string {
+    if (isHwp(session.fmt)) {
+      if (!session._doc) throw new Error("[docloom-web] hwp 세션에 문서 인스턴스가 없습니다.");
+      applyHwpEdits(session._doc as never, editedHtml);
+      return hwpToTreePreviewHtml(session._doc as never, { title: session._name ?? "", rawBytes: session._bytes });
+    }
+    return toPreviewHtml(editedHtml, { title: session._name ?? "" });
   }
 
   /** 편집된 HTML → 원본 포맷 바이트. hwp 는 .hwpx 로 저장(exportHwp 불안정). */
@@ -129,5 +147,5 @@ export function createDocloomWeb(deps: DocloomWebDeps = {}) {
     return { bytes: decode(editedHtml, session._manifest, { format: session.fmt as OfficeFormat }), ext: String(session.fmt) };
   }
 
-  return { open, restore, ensureRhwp };
+  return { open, restore, previewEdited, ensureRhwp };
 }
