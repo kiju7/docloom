@@ -8,6 +8,7 @@ _shapes.mjs
 
 # 데모 번들 + rhwp 런타임 복사본 (npm run demo:build 로 생성)
 demo/docloom.mjs
+demo/docloom-web.mjs
 demo/rhwp.js
 demo/rhwp_bg.wasm
 
