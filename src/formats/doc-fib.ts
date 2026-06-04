@@ -232,6 +232,35 @@ export function parsePieceTable(tableStream: Uint8Array, fcClx: number, lcbClx: 
   return pieces;
 }
 
+/**
+ * CLX 를 raw 수준까지 파싱: piece 배열 + 각 PCD 의 원본 8B + Pcdt 이전 RgPrc 접두 바이트.
+ * relayout(piece 분할 재작성)에서 PCD 머리/prm 을 보존하고 RgPrc 를 그대로 재방출하는 데 쓴다.
+ */
+export function parseClxRaw(
+  tableStream: Uint8Array,
+  fcClx: number,
+  lcbClx: number,
+): { pieces: Piece[]; pcdRaw: Uint8Array[]; rgprcBytes: Uint8Array } {
+  const pieces = parsePieceTable(tableStream, fcClx, lcbClx);
+  const dv = new DataView(tableStream.buffer, tableStream.byteOffset, tableStream.byteLength);
+  let p = fcClx;
+  const end = fcClx + lcbClx;
+  // RgPrc(0x01) 접두 길이 측정.
+  while (p < end && dv.getUint8(p) === 0x01) {
+    const cbGrpprl = dv.getUint16(p + 1, true);
+    p += 3 + cbGrpprl;
+  }
+  const rgprcBytes = tableStream.slice(fcClx, p); // Pcdt 이전 전부
+  // Pcdt: 0x02 + lcb(u32) + PlcPcd.
+  const lcb = dv.getUint32(p + 1, true);
+  const plcStart = p + 5;
+  const n = (lcb - 4) / 12;
+  const pcdBase = plcStart + (n + 1) * 4;
+  const pcdRaw: Uint8Array[] = [];
+  for (let i = 0; i < n; i++) pcdRaw.push(tableStream.slice(pcdBase + i * 8, pcdBase + i * 8 + 8));
+  return { pieces, pcdRaw, rgprcBytes };
+}
+
 /** cp1252 → 유니코드(상위 영역의 windows-1252 특수 매핑 포함). 0x80-0x9F 만 특수. */
 const CP1252_HIGH: Record<number, number> = {
   0x80: 0x20ac, 0x82: 0x201a, 0x83: 0x0192, 0x84: 0x201e, 0x85: 0x2026,

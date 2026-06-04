@@ -114,10 +114,49 @@ describe("doc 왕복(길이 보존 in-place 패치)", () => {
     expect(readTexts(out)).toEqual(["Alpha\rGamma\r"]);
   });
 
-  it("길이 변경 편집은 명확한 에러로 거부", () => {
+  it("길이 변경 편집은 기본 거부(allowRelayout 없이)", () => {
     const original = buildDoc("Hello World\r");
     const { html, manifest } = encodeDocToHtml(original);
     const edited = editPiece(html, "0:0", "Hi"); // 11 → 2자, 길이 변경
     expect(() => decodeHtmlToDoc(edited, manifest)).toThrow(/길이가 바뀌는/);
+  });
+});
+
+describe("doc 왕복(길이 변경 relayout, allowRelayout)", () => {
+  it("문단을 더 길게 편집 → piece 분할+append, 텍스트 반영·재파싱 정상", () => {
+    const original = buildDoc("Hello World\rSecond line\r");
+    const { html, manifest } = encodeDocToHtml(original);
+    // "Hello World"(11) → "Hello Wonderful World!!"(길이 증가)
+    const edited = editPiece(html, "0:0", "Hello Wonderful World!!");
+    const out = decodeHtmlToDoc(edited, manifest, { allowRelayout: true });
+
+    // 재파싱: 전체 텍스트 = 편집 반영 + 둘째 문단 보존.
+    const full = readTexts(out).join("");
+    expect(full).toContain("Hello Wonderful World!!");
+    expect(full).toContain("Second line");
+    // CFB·FIB 정상(재파싱이 throw 안 함) + WordDocument 가 커짐(append).
+    const outWd = readCfb(out).streams["WordDocument"]!;
+    expect(outWd.length).toBeGreaterThan(readCfb(original).streams["WordDocument"]!.length);
+  });
+
+  it("문단을 짧게 편집(삭제) → 텍스트 축소 반영", () => {
+    const original = buildDoc("Hello World\rSecond line\r");
+    const { html, manifest } = encodeDocToHtml(original);
+    const edited = editPiece(html, "0:0", "Hi"); // 11 → 2
+    const out = decodeHtmlToDoc(edited, manifest, { allowRelayout: true });
+    const full = readTexts(out).join("");
+    expect(full).toContain("Hi\r");
+    expect(full).toContain("Second line");
+    expect(full).not.toContain("Hello World");
+  });
+
+  it("ccpText 가 Δ만큼 갱신된다", () => {
+    const original = buildDoc("ABCDE\r");
+    const before = parseFib(readCfb(original).streams["WordDocument"]!).ccpText;
+    const { html, manifest } = encodeDocToHtml(original);
+    const edited = editPiece(html, "0:0", "ABCDEFGH"); // +3자
+    const out = decodeHtmlToDoc(edited, manifest, { allowRelayout: true });
+    const fib = parseFib(readCfb(out).streams["WordDocument"]!);
+    expect(fib.ccpText).toBe(before + 3);
   });
 });

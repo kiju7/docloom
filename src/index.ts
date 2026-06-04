@@ -36,6 +36,7 @@ export type { CsvDialect } from "./formats/csv.js";
 export { htmlAdapter, htmlEncode, htmlDecode, htmlToPreviewHtml } from "./formats/html.js";
 export { mdAdapter, mdEncode, mdDecode, mdToPreviewHtml, mdToHtml, htmlToMd } from "./formats/md.js";
 export { txtAdapter, txtEncode, txtDecode, txtToPreviewHtml } from "./formats/txt.js";
+export { rtfAdapter, rtfEncode, rtfDecode, rtfToPreviewHtml } from "./formats/rtf.js";
 export { pdfToPreviewHtml, pdfModelToPreviewHtml, extractPdfModel, buildPdfFromModel,
          extendPdfModel, pdfModelPagesHtml, pdfModelTotalPages, pdfModelFontFaceCss } from "./formats/pdf.js";
 export type { PdfEditModel } from "./formats/pdf.js";

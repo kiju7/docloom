@@ -39,8 +39,8 @@ describe.runIf(ready)("rhwp 기반 HWP 편집 채널 (표 셀 포함)", () => {
     const doc = new HwpDocument(new Uint8Array(readFileSync(HWP)));
     const html = hwpToEditableHtml(doc);
 
-    // 첫 번째 비어있지 않은 셀을 찾아 텍스트를 바꾼다.
-    const m = html.match(/<div data-hc="([^"]+)">([^<]+)<\/div>/);
+    // 첫 번째 비어있지 않은 셀을 찾아 텍스트를 바꾼다. (셀 div 는 미리보기 스타일 속성을 가질 수 있다.)
+    const m = html.match(/<div data-hc="([^"]+)"[^>]*>([^<]+)<\/div>/);
     expect(m).toBeTruthy();
     const original = m![2];
     const marker = original + "★EDIT";

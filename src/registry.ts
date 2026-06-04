@@ -8,7 +8,7 @@ import type { FormatAdapter, OfficeFormat, PreviewOptionsBase } from "./core/for
 import type { Manifest } from "./model/manifest.js";
 import { readZip } from "./core/zip.js";
 import { toPreviewHtml as wrapPreviewBody } from "./preview/preview.js";
-import { detectContainer, detectOoxml, detectCfbSubtype, detectTextSubtype, isHwpx } from "./core/detect.js";
+import { detectContainer, detectOoxml, detectCfbSubtype, detectTextSubtype, isHwpx, isRtf } from "./core/detect.js";
 import { docxAdapter } from "./formats/docx.js";
 import { pptxAdapter } from "./formats/pptx.js";
 import { xlsxAdapter } from "./formats/xlsx.js";
@@ -16,6 +16,7 @@ import { csvAdapter } from "./formats/csv.js";
 import { htmlAdapter } from "./formats/html.js";
 import { mdAdapter } from "./formats/md.js";
 import { txtAdapter } from "./formats/txt.js";
+import { rtfAdapter } from "./formats/rtf.js";
 import { pdfAdapter } from "./formats/pdf.js";
 import { hwpxAdapter } from "./formats/hwpx.js";
 import { hwpAdapter } from "./formats/hwp.js";
@@ -33,6 +34,7 @@ export const ADAPTERS: Record<OfficeFormat, FormatAdapter | undefined> = {
   html: htmlAdapter,
   md: mdAdapter,
   txt: txtAdapter,
+  rtf: rtfAdapter,
   pdf: pdfAdapter,
   hwpx: hwpxAdapter,
   hwp: hwpAdapter,
@@ -53,7 +55,7 @@ export function getAdapter(format: OfficeFormat): FormatAdapter {
 }
 
 /** 평문 컨테이너 안에서만 의미 있는 포맷(매직 없이 내용/확장자로 구분). */
-const TEXT_FORMATS = new Set<OfficeFormat>(["csv", "html", "md", "txt"]);
+const TEXT_FORMATS = new Set<OfficeFormat>(["csv", "html", "md", "txt", "rtf"]);
 
 /**
  * 바이트에서 포맷을 판별하고 어댑터를 돌려준다.
@@ -79,6 +81,8 @@ export function adapterFor(bytes: Uint8Array, hint?: OfficeFormat): FormatAdapte
   // 비-zip 포맷은 unzip 없이 컨테이너 종류로 바로 라우팅한다.
   if (container === "pdf") return getAdapter("pdf");
   if (container === "text") {
+    // RTF 는 매직 `{\rtf` 로 확실히 구분된다(힌트보다 우선 — 내용추정 오판 방지).
+    if (isRtf(bytes)) return getAdapter("rtf");
     // 확장자 힌트가 평문 포맷이면 그걸 신뢰, 아니면 내용으로 추정(csv/html/md/txt).
     const sub = hint && TEXT_FORMATS.has(hint) ? hint : detectTextSubtype(bytes);
     return getAdapter(sub);

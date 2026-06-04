@@ -22,7 +22,8 @@
 import { parse } from "node-html-parser";
 import type { Manifest } from "../model/manifest.js";
 import { readCfb, writeCfb } from "../core/cfb.js";
-import { parseFib, parsePieceTable, readPieceText, encodePieceText, type Piece } from "../formats/doc-fib.js";
+import { parseFib, parsePieceTable, parseClxRaw, readPieceText, encodePieceText, type Piece } from "../formats/doc-fib.js";
+import { relayoutDoc } from "./docRelayout.js";
 import { DOC_SOURCE_KEY, DOC_MAIN_STREAM } from "../encode/docToHtml.js";
 
 /** HTML 의 data-piece 별 편집 텍스트 추출(<br>→\n, 엔티티 디코드). */
@@ -77,11 +78,14 @@ function rebuildPieceText(origPieceText: string, edited: Map<string, string>, pi
 }
 
 export interface DocDecodeOptions {
-  /** 예약(향후 길이 변경 재배치용). 현재는 사용하지 않으며 길이 변경은 항상 거부. */
+  /**
+   * 길이 변경 편집 허용. 기본 false(거부 — 안전). true 면 piece 분할+append relayout 으로
+   * 베스트에포트 복원(미편집 영역 서식 보존, 편집 런 인라인 글자서식은 기본값).
+   */
   allowRelayout?: boolean;
 }
 
-export function decodeHtmlToDoc(html: string, manifest: Manifest, _opts: DocDecodeOptions = {}): Uint8Array {
+export function decodeHtmlToDoc(html: string, manifest: Manifest, opts: DocDecodeOptions = {}): Uint8Array {
   const source = manifest.originalParts[DOC_SOURCE_KEY];
   if (!source) throw new Error("DOC manifest: 원본 컨테이너 바이트(__source__)가 없음");
 
@@ -100,47 +104,59 @@ export function decodeHtmlToDoc(html: string, manifest: Manifest, _opts: DocDeco
   const edited = readEditedParas(html);
   const origText: Record<string, string> = JSON.parse(manifest.native?.origText ?? "{}");
 
-  // piece 별로 새 전체 텍스트 산출 → 변경된 piece 만 패치.
-  interface Patch {
-    piece: Piece;
-    newBytes: Uint8Array;
-  }
-  const patches: Patch[] = [];
+  // piece 별로 새 전체 텍스트 산출 → 같은길이는 in-place, 길이변경은 relayout.
+  interface Patch { piece: Piece; newBytes: Uint8Array }
+  const inPlace: Patch[] = [];               // 같은 바이트 길이(제자리 덮어쓰기)
+  const lenChanged = new Map<number, string>(); // pieceIdx → 새 텍스트(길이 변경)
+  const origByPiece = new Map<number, string>();
 
   for (let pi = 0; pi < pieces.length; pi++) {
     const piece = pieces[pi]!;
     const orig = origText[String(pi)] ?? readPieceText(wordDocument, piece);
+    origByPiece.set(pi, orig);
     const rebuilt = rebuildPieceText(orig, edited, pi);
     if (rebuilt === orig) continue; // 변경 없음
 
-    // 같은 압축방식으로 재인코딩.
     const newBytes = encodePieceText(rebuilt, piece.compressed);
-    if (!newBytes) {
+    // 같은 압축으로 무손실 인코딩되고 길이도 같으면 in-place(서식 완전 보존).
+    if (newBytes && newBytes.length === piece.byteLength) {
+      inPlace.push({ piece, newBytes });
+      continue;
+    }
+    // 길이 변경(또는 압축 인코딩 불가) → relayout 대상.
+    if (!opts.allowRelayout) {
       throw new Error(
-        `DOC piece ${pi}: 편집 텍스트를 ${piece.compressed ? "cp1252(압축)" : "UTF-16LE"} 로 무손실 인코딩할 수 없습니다. ` +
-          `이 piece 는 해당 문자집합으로 표현 가능한 문자만 편집할 수 있습니다.`,
+        `DOC piece ${pi}: 길이가 바뀌는 편집은 기본 비활성입니다(원본 ${piece.byteLength}B). ` +
+          `opts.allowRelayout=true 로 명시하면 piece 분할+append 로 복원합니다(미편집 영역 서식 보존, ` +
+          `편집 런 인라인 글자서식은 기본값, 일부 필드/책갈피 위치 드리프트 가능).`,
       );
     }
-    // 길이 보존 검증: 같은 바이트 길이여야 in-place 패치 가능.
-    if (newBytes.length !== piece.byteLength) {
-      throw new Error(
-        `DOC piece ${pi}: 길이가 바뀌는 편집은 지원하지 않습니다(원본 ${piece.byteLength}B → ${newBytes.length}B). ` +
-          `piece table·FIB·서식 plex 오프셋 재작성이 필요해 범위에서 제외됩니다. ` +
-          `같은 문자 수(같은 압축 기준 같은 바이트 길이)로만 편집하세요.`,
-      );
-    }
-    patches.push({ piece, newBytes });
+    lenChanged.set(pi, rebuilt);
   }
 
-  if (patches.length === 0) {
-    // 변경 없음 → 원본 그대로 재조립.
+  if (inPlace.length === 0 && lenChanged.size === 0) {
+    return writeCfb({ entries: cfb.entries, data: cfb.data }); // 변경 없음
+  }
+
+  // ── 길이 변경 없음: 기존 in-place 경로(서식 100% 보존) ──
+  if (lenChanged.size === 0) {
+    const newWd = wordDocument.slice();
+    for (const p of inPlace) newWd.set(p.newBytes, p.piece.fcStart);
+    cfb.data.set(wdIdx, newWd);
     return writeCfb({ entries: cfb.entries, data: cfb.data });
   }
 
-  // ── 길이 보존 in-place 패치: WordDocument 의 piece 바이트만 제자리 덮어쓰기 ──
-  const newWd = wordDocument.slice();
-  for (const p of patches) newWd.set(p.newBytes, p.piece.fcStart);
+  // ── 길이 변경 있음: relayout(piece 분할 + append) ──
+  const { pcdRaw, rgprcBytes } = parseClxRaw(table, fib.fcClx, fib.lcbClx);
+  const { newWordDocument, newTable } = relayoutDoc(
+    wordDocument, table, fib, pieces, pcdRaw, rgprcBytes, origByPiece, lenChanged,
+  );
+  // 같은길이 piece 패치는 원본 FC 가 보존되므로 newWordDocument 에 그대로 덮어쓰기.
+  for (const p of inPlace) newWordDocument.set(p.newBytes, p.piece.fcStart);
 
-  cfb.data.set(wdIdx, newWd);
+  cfb.data.set(wdIdx, newWordDocument);
+  const tblIdx = cfb.pathOf.get(fib.tableStreamName);
+  if (tblIdx === undefined) throw new Error(`DOC: Table 스트림 인덱스를 찾지 못했습니다(${fib.tableStreamName}).`);
+  cfb.data.set(tblIdx, newTable);
   return writeCfb({ entries: cfb.entries, data: cfb.data });
 }

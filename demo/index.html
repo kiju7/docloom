@@ -129,6 +129,7 @@
   .badge.xls{ background:#e1f6ec; color:#168a52; }
   .badge.html{ background:#fdeede; color:#c2680c; } .badge.md{ background:#eef3fb; color:#4b5563; }
   .badge.txt{ background:#eef1f4; color:#566072; }
+  .badge.rtf{ background:#fdeede; color:#c2680c; }
   .fname { color:var(--fg); font-weight:650; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .msg { font-size:12.5px; flex:none; }
   .msg.ok { color:var(--ok); font-weight:650; } .msg.err { color:var(--err); font-weight:650; }
@@ -161,6 +162,22 @@
   #editor td, #editor th { border:1px solid #d6d9dd; padding:4px 8px; }
   #editor [data-frozen], #editor [data-frozen-run] { background:#eef0ff; color:#5b6cff; border-radius:4px; padding:0 4px; }
   #editor section { border:1px dashed #d6d9dd; border-radius:8px; padding:12px 14px; margin:0 0 14px; }
+  /* 한글(.hwp/.hwpx) 편집기: 미리보기(흰 종이)와 비슷하게 — 회색 배경 위 중앙 종이 시트.
+     셀 테두리/정렬/글자색은 hwpToEditableHtml 이 인라인 스타일로 넣으므로 여기선 종이 틀만. */
+  #editor:has(.hwp-edit) { background:#eceef0; padding:24px 0; }
+  .hwp-edit { max-width:820px; margin:0 auto; background:#fff; padding:40px 44px; box-sizing:border-box;
+    box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.08);
+    font-family:'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif; line-height:1.5; }
+  .hwp-edit .hp-tbl, .hwp-edit .hwp-tbl { border-collapse:collapse; max-width:100%; }
+  .hwp-edit .hp-tbl td { vertical-align:middle; word-break:break-word; }
+  /* 페이지 경계 표시(편집불가·시각 전용). 흰 시트 좌우 패딩 밖까지 선을 늘린다. */
+  .hwp-edit .hwp-pagebreak { text-align:center; color:#aab1bb; font-size:11px; user-select:none;
+    margin:20px -44px 16px; border-top:1px dashed #c7ccd3; padding-top:5px; }
+  /* 머리말/꼬리말: 본문과 구분되는 옅은 박스 + 라벨. 안쪽 문단 div 는 그대로 편집 가능. */
+  .hwp-edit .hwp-hf { border:1px dashed #c7ccd3; border-radius:6px; background:#fafbfc;
+    padding:6px 12px 8px; margin:0 0 16px; }
+  .hwp-edit .hwp-hf[data-hf-kind="footer"] { margin:18px 0 0; }
+  .hwp-edit .hwp-hf-label { display:block; font-size:10px; color:#9aa1ab; user-select:none; margin-bottom:2px; }
 
   code { background:var(--panel); padding:2px 7px; border-radius:6px; border:1px solid var(--line); color:var(--muted); }
 
@@ -248,7 +265,7 @@
     </div>
   </div>
 
-  <input type="file" id="file" accept=".docx,.doc,.pptx,.ppt,.xlsx,.xls,.csv,.pdf,.hwpx,.hwp,.html,.htm,.md,.markdown,.txt" />
+  <input type="file" id="file" accept=".docx,.doc,.pptx,.ppt,.xlsx,.xls,.csv,.pdf,.hwpx,.hwp,.html,.htm,.md,.markdown,.txt,.rtf" />
 </div>
 
 <!-- Full-page drag veil -->
@@ -261,7 +278,7 @@
   import { previewHtml, adapterFor, encode, decode, editablePreviewHtml, formatFromFilename,
            extractPdfModel, pdfModelToPreviewHtml, buildPdfFromModel,
            extendPdfModel, pdfModelPagesHtml, pdfModelTotalPages, pdfModelFontFaceCss,
-           hwpToEditableHtml, applyHwpEdits, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260602align2";
+           hwpToEditableHtml, applyHwpEdits, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260604align";
   // 한글(.hwp/.hwpx) 충실 렌더 — rhwp(Rust+WASM, 소스빌드 vendor/rhwp) 의 절대배치 HTML 렌더.
   import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260602fixes";
 
@@ -431,7 +448,13 @@
       // 나머지=docloom 미리보기(+편집&복원 토글).
       const isHangul = (fmt === "hwp" || fmt === "hwpx");
       const isPdf = (fmt === "pdf");
-      const isDirectEdit = (fmt === "csv"); // office/docx 는 리치 미리보기 유지(직접편집은 형식 단순화→되돌림)
+      // 문서형 왕복 포맷은 "미리보기에서 바로 편집"(보던 화면 그대로 수정→복원).
+      // encode 본문이 .docloom-doc 계열이라 미리보기 CSS가 입혀져 보기≈편집이 된다.
+      // pptx·xlsx 는 슬라이드/시트 전용 렌더라 제외(리치 미리보기 유지), hwp/hwpx·pdf 는 전용 편집 경로.
+      // ⚠ html 제외: html 의 encode 출력은 docloom 마크업이 아니라 문서 자신의 임의 HTML 이라,
+      //    직접편집 셸(.docloom-doc 용지 CSS)에 끼우면 원본 <head>/<style> 이 사라져 이상하게 보인다.
+      //    → faithful previewHtml(원본 그대로 자기 CSS)로 미리보고, 편집은 md 처럼 "편집&복원" 토글로.
+      const isDirectEdit = ["csv", "docx", "doc", "txt"].includes(fmt);
       pdfModel = null; directEdit = null;
       let html;
       if (isPdf) {
@@ -439,8 +462,9 @@
         pdfModel = extractPdfModel(bytes, { maxPages: PDF_PAGE_CHUNK });
         html = pdfModelToPreviewHtml(pdfModel, { title: file.name, editable: true });
       } else if (isDirectEdit) {
-        // docx·csv: 편집채널을 미리보기 스타일+contenteditable 로 → 그 화면에서 바로 수정.
-        const ep = editablePreviewHtml(bytes, { title: file.name });
+        // 편집채널을 미리보기 스타일+contenteditable 로 → 그 화면에서 바로 수정.
+        // 평문(csv·html·txt)은 매직으로 구분 안 되니 판별된 fmt 를 어댑터 힌트로 넘긴다.
+        const ep = editablePreviewHtml(bytes, { title: file.name, format: fmt });
         directEdit = { manifest: ep.manifest, format: ep.format };
         html = ep.html;
       } else if (isHangul) {
@@ -519,8 +543,9 @@
     try {
       if (curFmt === "hwp" || curFmt === "hwpx") {
         // 한글: rhwp 로 표 셀까지 펼친 편집 HTML. (.hwp 도 복원은 .hwpx 로 — exportHwp 불안정)
+        // curHwpDoc 가 이미 있으면(편집↔미리보기 토글) 재생성하지 않는다 — 이전 편집을 보존.
         await ensureRhwp();
-        curHwpDoc = new HwpDocument(curBytes);
+        if (!curHwpDoc) curHwpDoc = new HwpDocument(curBytes);
         editor.innerHTML = hwpToEditableHtml(curHwpDoc);
       } else {
         const { html, manifest } = encode(curBytes, { format: curFmt });
@@ -537,8 +562,21 @@
     }
   });
 
-  // 미리보기로 복귀
+  // 미리보기로 복귀. 한글은 편집 내용을 문서에 반영하고 미리보기를 다시 그려 수정이 보이게 한다.
   previewBtn.addEventListener("click", () => {
+    if (curHwpDoc) {
+      try {
+        applyHwpEdits(curHwpDoc, editor.innerHTML);   // 편집 → 문서 반영(멱등: 이미 반영분은 0건)
+        const html = hwpToTreePreviewHtml(curHwpDoc, { title: curName, rawBytes: curBytes });
+        lastHtml = html;
+        if (lastFrameUrl) { URL.revokeObjectURL(lastFrameUrl); lastFrameUrl = null; }
+        frame.removeAttribute("srcdoc");
+        lastFrameUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+        frame.src = lastFrameUrl;
+      } catch (e) {
+        msg.className = "msg err"; msg.textContent = "✗ 미리보기 갱신 실패: " + (e?.message ?? e);
+      }
+    }
     showPreviewMode();
   });
 
@@ -571,7 +609,9 @@
       editedHtml = editor.innerHTML; manifest = curManifest; format = curFmt;
     }
     try {
-      const out = decode(editedHtml, manifest, { format });
+      // .ppt(PowerPoint 97-2003)는 길이 변경 편집에 오프셋 재배치(전략 B)가 필요 → 옵트인 전달.
+      // 다른 포맷은 이 옵션을 무시한다(.doc 는 별도 한계로 길이 변경 시 여전히 거부).
+      const out = decode(editedHtml, manifest, { format, allowRelayout: true });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
       a.download = curName.replace(/(\.[^.]+)?$/, (m) => m || "." + format);

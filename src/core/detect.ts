@@ -77,6 +77,16 @@ export function detectOoxml(parts: Record<string, Uint8Array>): OfficeFormat | u
  *   zip(docx/pptx/xlsx) → cfb(구버전 doc/ppt/xls) → pdf → text(csv) → unknown.
  * pdf 는 자체 객체 구조, text 는 매직이 없어 "바이너리가 아님"으로 소거 판별한다.
  */
+/** RTF 매직 `{\rtf` (선두, BOM/공백 허용). */
+export function isRtf(bytes: Uint8Array): boolean {
+  let i = 0;
+  // UTF-8 BOM·선행 공백 스킵.
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) i = 3;
+  while (i < bytes.length && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)) i++;
+  // "{\rtf"
+  return bytes[i] === 0x7b && bytes[i + 1] === 0x5c && bytes[i + 2] === 0x72 && bytes[i + 3] === 0x74 && bytes[i + 4] === 0x66;
+}
+
 export function detectContainer(bytes: Uint8Array): "zip" | "cfb" | "pdf" | "text" | "unknown" {
   if (isZip(bytes)) return "zip";
   if (isCfb(bytes)) return "cfb";
@@ -187,6 +197,8 @@ export function formatFromFilename(name: string): OfficeFormat | undefined {
     case "text":
     case "log":
       return "txt";
+    case "rtf":
+      return "rtf";
     default:
       return undefined;
   }

@@ -60,6 +60,9 @@ export interface RhwpDoc {
   getPageControlLayout?(page: number): string;
   getHeaderFooter?(section: number, isHeader: boolean, applyTo: number): string;
   getParaPropertiesInHf?(section: number, isHeader: boolean, applyTo: number, hfParaIdx: number): string;
+  getHeaderFooterParaInfo?(section: number, isHeader: boolean, applyTo: number, hfParaIdx: number): string;
+  insertTextInHeaderFooter?(section: number, isHeader: boolean, applyTo: number, hfParaIdx: number, charOffset: number, text: string): string;
+  deleteTextInHeaderFooter?(section: number, isHeader: boolean, applyTo: number, hfParaIdx: number, charOffset: number, count: number): string;
   // 하이브리드 미리보기(hwpToHybridPreviewHtml)용 — rhwp 의 SVG 렌더.
   pageCount?(): number;
   renderPageSvg?(page: number): string;
@@ -204,51 +207,134 @@ function renderNestedTablesEditable(
  * 편집 가능한 텍스트마다 앵커를 단다: 평문 문단 `data-h="s,p"`, 표 셀 문단
  * `data-hc="s,p,control,cell,cellPara"`, **중첩표 셀 `data-hcp="s|parentPara|경로"`**.
  */
+/** 문단의 (0-based) 페이지 번호. getPageOfPosition 미지원/실패 시 null. */
+function pageOf(doc: RhwpDoc, s: number, p: number): number | null {
+  const r = doc.getPageOfPosition ? pj<any>(safe(() => doc.getPageOfPosition!(s, p))) : null;
+  return r && typeof r.page === "number" ? r.page : null;
+}
+
+/** 편집화면용 페이지 구분선(시각 전용·편집불가·앵커없음 → 복원에 영향 없음). */
+function pageBreakMarker(pageNum: number): string {
+  return `<div class="hwp-pagebreak" contenteditable="false" data-norestore="1">⎯ ${pageNum + 1} 쪽 ⎯</div>\n`;
+}
+
+/**
+ * 표 셀의 첫 줄 **시각 정렬**(left/right/center)을 `pi|ci|row|col` 로 색인.
+ * 편집 표가 트리 미리보기(lineAlign, bbox 기반)와 같은 정렬을 쓰게 한다 — hwpx 는
+ * getCellParaProperties.alignment 가 실제 표시(왼쪽)와 어긋나 "center" 라고 하는 셀이 있어,
+ * 논리값만 믿으면 표 정렬이 뒤죽박죽이 된다. 중첩표(pi/ci 없음)는 제외.
+ */
+function buildCellAlignMap(doc: RhwpDoc): Map<string, string> {
+  const m = new Map<string, string>();
+  if (!doc.getPageRenderTree || !doc.pageCount) return m;
+  const n = safe(() => doc.pageCount!()) ?? 0;
+  const firstTextLine = (node: TNode): TNode | null => {
+    if (!node || typeof node !== "object") return null;
+    if (node.type === "TextLine" &&
+      (node.children ?? []).some((c) => c.type === "TextRun" && (c.text ?? "").length)) return node;
+    if (node.type === "Table") return null; // 이 셀 자체 줄만(중첩표로 안 내려감)
+    for (const c of node.children ?? []) { const r = firstTextLine(c); if (r) return r; }
+    return null;
+  };
+  const walk = (node: TNode): void => {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "Table" && typeof node.pi === "number" && typeof node.ci === "number") {
+      for (const cell of (node.children ?? []).filter((c) => c.type === "Cell")) {
+        const fl = firstTextLine(cell);
+        if (!fl) continue;
+        const key = `${node.pi}|${node.ci}|${cell.row ?? 0}|${cell.col ?? 0}`;
+        if (!m.has(key)) m.set(key, lineAlign(fl) || "left");
+      }
+    }
+    for (const c of node.children ?? []) walk(c);
+  };
+  for (let pg = 0; pg < n; pg++) {
+    const tree = pj<TNode>(safe(() => doc.getPageRenderTree!(pg)));
+    if (tree) walk(tree);
+  }
+  return m;
+}
+
+interface HfBlock { s: number; isHeader: boolean; applyTo: number; parts: string[] }
+
+/**
+ * 한 섹션의 머리말/꼬리말 수집. getHeaderFooter 의 `text`(문단을 \n 으로 이은 것)를 문단별로 분리한다.
+ * applyTo(0=양쪽/1=짝수/2=홀수)를 훑되 같은 물리 HF(paraIndex/controlIndex)는 중복 제거.
+ * 내용이 전부 공백인 HF(빈 머리말 등)는 화면을 어지럽히지 않게 제외.
+ */
+function collectHfBlocks(doc: RhwpDoc, s: number): HfBlock[] {
+  if (!doc.getHeaderFooter) return [];
+  const out: HfBlock[] = [];
+  const seen = new Set<string>();
+  for (const isHeader of [true, false]) {
+    for (const at of [0, 1, 2]) {
+      const hf = pj<any>(safe(() => doc.getHeaderFooter!(s, isHeader, at)));
+      if (!hf || !hf.exists) continue;
+      const key = `${isHeader}|${hf.paraIndex ?? -1}|${hf.controlIndex ?? -1}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const applyTo = typeof hf.applyTo === "number" ? hf.applyTo : at;
+      const parts = (typeof hf.text === "string" ? hf.text : "").split("\n");
+      if (parts.every((p: string) => norm(p) === "")) continue; // 빈 HF 제외
+      out.push({ s, isHeader, applyTo, parts });
+    }
+  }
+  return out;
+}
+
+/** 머리말/꼬리말 한 개 → 라벨 + 문단별 편집 가능 div(앵커 data-hf="s,isHeader,applyTo,paraIdx"). */
+function renderHfEditable(b: HfBlock): string {
+  const kind = b.isHeader ? "머리말" : "꼬리말";
+  const tag = b.applyTo === 1 ? " (짝수 쪽)" : b.applyTo === 2 ? " (홀수 쪽)" : "";
+  const ish = b.isHeader ? 1 : 0;
+  let inner = "";
+  for (let i = 0; i < b.parts.length; i++) {
+    inner += `<div data-hf="${b.s},${ish},${b.applyTo},${i}" style="white-space:pre-wrap">${esc(b.parts[i]!) || "<br>"}</div>`;
+  }
+  return `<div class="hwp-hf" data-hf-kind="${b.isHeader ? "header" : "footer"}">` +
+    `<span class="hwp-hf-label" contenteditable="false">${kind}${tag}</span>${inner}</div>\n`;
+}
+
 export function hwpToEditableHtml(doc: RhwpDoc): string {
   const secN = sectionCount(doc);
+  // 머리말/꼬리말(편집 가능) — 머리말은 본문 위, 꼬리말은 본문 아래에 배치한다.
+  const headers: string[] = [];
+  const footers: string[] = [];
+  for (let s = 0; s < secN; s++) {
+    for (const b of collectHfBlocks(doc, s)) (b.isHeader ? headers : footers).push(renderHfEditable(b));
+  }
+  // 셀 정렬은 트리(시각) 기준 — hwpx 논리 alignment 가 어긋나는 셀 보정.
+  const alignMap = buildCellAlignMap(doc);
   let body = "";
+  let lastPage = -1; // 직전 문단의 페이지(0-based). 증가하면 구분선을 넣어 페이지 경계를 보여준다.
   for (let s = 0; s < secN; s++) {
     const pc = safe(() => doc.getParagraphCount(s)) ?? 0;
     for (let p = 0; p < pc; p++) {
       const tables = tablesInPara(doc, s, p);
       const ctrlCount = (pj<number[]>(safe(() => doc.getControlTextPositions(s, p))) ?? []).length;
 
-      // 평문 문단(컨트롤 없음): 텍스트가 있으면 편집 가능한 <p>
-      const plen = safe(() => doc.getParagraphLength(s, p)) ?? 0;
-      if (ctrlCount === 0 && plen > 0) {
-        const t = safe(() => doc.getTextRange(s, p, 0, plen)) ?? "";
-        body += `<p data-h="${s},${p}">${esc(t)}</p>\n`;
-      } else if (ctrlCount === 0 && plen === 0) {
-        body += `<p data-h="${s},${p}"><br></p>\n`; // 빈 문단(편집 시 채울 수 있게)
+      // 페이지 경계: 이 문단이 새 페이지에서 시작하면 구분선 삽입(미리보기의 종이 구분 ≈ 흐름 편집기).
+      const pg = pageOf(doc, s, p);
+      if (pg !== null && lastPage !== -1 && pg > lastPage) body += pageBreakMarker(pg);
+      if (pg !== null) lastPage = pg;
+
+      // 평문 문단(컨트롤 없음): 미리보기와 같은 글자·정렬 스타일을 입힌 편집 가능한 <p>.
+      // (빈 문단도 앵커를 달아 편집 시 채울 수 있게 한다.)
+      if (ctrlCount === 0) {
+        const plen = safe(() => doc.getParagraphLength(s, p)) ?? 0;
+        const text = plen > 0 ? safe(() => doc.getTextRange(s, p, 0, plen)) ?? "" : "";
+        const cprops = doc.getCharPropertiesAt ? pj(safe(() => doc.getCharPropertiesAt!(s, p, 0))) : null;
+        const pprops = doc.getParaPropertiesAt ? pj(safe(() => doc.getParaPropertiesAt!(s, p))) : null;
+        body += editablePara(text, cprops, pprops, `data-h="${s},${p}"`) + "\n";
       }
 
-      // 표: 셀마다 편집 가능한 문단 노출
+      // 표: 미리보기와 동일한 병합·열너비·셀배경·정렬을 입히되, 셀 문단마다 data-hc 앵커로 복원 가능.
       for (const t of tables) {
-        body += `<table class="hwp-tbl" data-ht="${s},${p},${t.ci}">\n<tbody>\n`;
-        let cell = 0;
-        for (let r = 0; r < t.rows && cell < t.cells; r++) {
-          body += "<tr>";
-          for (let c = 0; c < t.cols && cell < t.cells; c++) {
-            const cpc = safe(() => doc.getCellParagraphCount(s, p, t.ci, cell)) ?? 0;
-            let inner = "";
-            for (let cp = 0; cp < cpc; cp++) {
-              const l = safe(() => doc.getCellParagraphLength(s, p, t.ci, cell, cp)) ?? 0;
-              const text = l > 0 ? safe(() => doc.getTextInCell(s, p, t.ci, cell, cp, 0, l)) ?? "" : "";
-              inner += `<div data-hc="${s},${p},${t.ci},${cell},${cp}">${esc(text) || "<br>"}</div>`;
-              // 이 셀 문단이 품은 중첩표(표 안의 표)도 편집 가능하게 재귀 노출.
-              inner += renderNestedTablesEditable(doc, s, p, [[t.ci, cell, cp]]);
-            }
-            if (!inner) inner = "<br>";
-            body += `<td>${inner}</td>`;
-            cell++;
-          }
-          body += "</tr>\n";
-        }
-        body += "</tbody>\n</table>\n";
+        body += renderRhwpTable(doc, s, p, t, { editable: true, alignMap }) + "\n";
       }
     }
   }
-  return `<div class="hwp-edit" data-hwp-edit="1">\n${body}</div>`;
+  return `<div class="hwp-edit" data-hwp-edit="1">\n${headers.join("")}${body}${footers.join("")}</div>`;
 }
 
 /** "s,p[,…]" 앵커를 정수 배열로. */
@@ -323,6 +409,27 @@ export function applyHwpEdits(doc: RhwpDoc, editedHtml: string): number {
     changed++;
   }
 
+  // 머리말/꼬리말 — data-hf="s,isHeader(1/0),applyTo,hfParaIdx". 문단별 텍스트 교체.
+  if (doc.getHeaderFooter && doc.insertTextInHeaderFooter && doc.deleteTextInHeaderFooter) {
+    for (const el of root.querySelectorAll("[data-hf]")) {
+      const a = addr(el, "data-hf");
+      if (!a || a.length !== 4) continue;
+      const [s, ish, at, pi] = a;
+      const isHeader = ish === 1;
+      const next = nodeText(el);
+      const hf = pj<any>(safe(() => doc.getHeaderFooter!(s!, isHeader, at!)));
+      if (!hf || !hf.exists) continue;
+      const parts = (typeof hf.text === "string" ? hf.text : "").split("\n");
+      const cur = norm(parts[pi!] ?? "");
+      if (cur === next) continue;
+      const info = pj<any>(safe(() => doc.getHeaderFooterParaInfo?.(s!, isHeader, at!, pi!)));
+      const len = info && typeof info.charCount === "number" ? info.charCount : [...(parts[pi!] ?? "")].length;
+      if (len > 0) safe(() => doc.deleteTextInHeaderFooter!(s!, isHeader, at!, pi!, 0, len));
+      if (next) safe(() => doc.insertTextInHeaderFooter!(s!, isHeader, at!, pi!, 0, next));
+      changed++;
+    }
+  }
+
   return changed;
 }
 
@@ -373,6 +480,34 @@ function renderPara(text: string, charProps: any, paraProps: any): string {
   return `<p style="${css.join(";")}">${inner}</p>`;
 }
 
+/**
+ * 편집용 문단/셀 스타일(정렬·줄간격·글자속성 + 공백/탭/줄바꿈 보존).
+ * ⚠ 편집 텍스트는 **literal newline 그대로**(white-space:pre-wrap 로 시각만 줄바꿈) — `\n→<br>` 로
+ * 바꾸면 applyHwpEdits 의 nodeText(=textContent)가 줄바꿈을 잃어 왕복이 깨진다. 그래서 renderPara
+ * 와 달리 텍스트 표현은 손대지 않고 스타일만 입힌다(앵커 텍스트 동등성 유지 → 복원 안전).
+ */
+function paraEditCss(charProps: any, paraProps: any, alignOverride?: string): string {
+  const css: string[] = ["margin:0", "white-space:pre-wrap"];
+  // 정렬: 호출자가 시각 정렬(트리 lineAlign)을 주면 그걸 신뢰한다. hwpx 는 getCellParaProperties
+  // 의 alignment 가 실제 표시(왼쪽)와 어긋나 "center" 라고 하는 셀이 있어, 논리값만 믿으면 표가
+  // 뒤죽박죽이 된다. override 가 없을 때만 논리 alignment 사용. justify(양쪽)는 트리 미리보기처럼
+  // 좌측 취급(생략) — CSS text-align:justify 는 다줄 한글에서 글자 간격이 벌어져 지저분.
+  const align = alignOverride !== undefined ? alignOverride : paraProps?.alignment;
+  if (align === "center" || align === "right") css.push(`text-align:${align}`);
+  if (typeof paraProps?.lineSpacing === "number" && paraProps.lineSpacingType === "Percent") {
+    css.push(`line-height:${(paraProps.lineSpacing / 100).toFixed(2)}`);
+  }
+  const cc = charCss(charProps);
+  if (cc) css.push(cc);
+  return css.join(";");
+}
+
+/** 편집 가능한 문단 한 개: 미리보기 스타일 + 앵커. inner 텍스트는 esc(text) 그대로(복원 동등성). */
+function editablePara(text: string, charProps: any, paraProps: any, anchorAttr: string): string {
+  const inner = text ? esc(text) : "<br>";
+  return `<p ${anchorAttr} style="${paraEditCss(charProps, paraProps)}">${inner}</p>`;
+}
+
 /** 표 셀 속성 → td CSS(배경·테두리·세로정렬·너비·패딩). */
 function cellCss(props: any): string {
   const css: string[] = [];
@@ -405,19 +540,31 @@ interface GridCell {
  * 표 한 개 → <table> HTML. **getCellInfo 의 실제 row/col/span 으로 그리드를 재구성**(셀을 행우선
  * 순차로 깔면 병합셀 표가 깨진다). 열 너비는 <colgroup>(colSpan==1 셀의 width)로 지정.
  */
-function renderRhwpTable(doc: RhwpDoc, s: number, p: number, t: TableRef): string {
+function renderRhwpTable(doc: RhwpDoc, s: number, p: number, t: TableRef, opts: { editable?: boolean; alignMap?: Map<string, string> } = {}): string {
   const cells: GridCell[] = [];
   for (let idx = 0; idx < t.cells; idx++) {
     const info = doc.getCellInfo ? pj<any>(safe(() => doc.getCellInfo!(s, p, t.ci, idx))) : null;
     const props = doc.getCellProperties ? pj<any>(safe(() => doc.getCellProperties!(s, p, t.ci, idx))) : null;
     const cpc = safe(() => doc.getCellParagraphCount(s, p, t.ci, idx)) ?? 0;
+    // 셀의 시각 정렬(트리 lineAlign) — hwpx 논리 alignment 불일치 보정. 셀 단위(첫 줄 기준).
+    const vAlign = opts.editable && opts.alignMap
+      ? opts.alignMap.get(`${p}|${t.ci}|${info?.row ?? 0}|${info?.col ?? 0}`)
+      : undefined;
     let inner = "";
     for (let cp = 0; cp < cpc; cp++) {
       const l = safe(() => doc.getCellParagraphLength(s, p, t.ci, idx, cp)) ?? 0;
       const text = l > 0 ? safe(() => doc.getTextInCell(s, p, t.ci, idx, cp, 0, l)) ?? "" : "";
       const cc = doc.getCellCharPropertiesAt ? pj(safe(() => doc.getCellCharPropertiesAt!(s, p, t.ci, idx, cp, 0))) : null;
       const pcp = doc.getCellParaPropertiesAt ? pj(safe(() => doc.getCellParaPropertiesAt!(s, p, t.ci, idx, cp))) : null;
-      inner += renderPara(text, cc, pcp);
+      if (opts.editable) {
+        // 셀 문단을 미리보기 스타일로 입히되 앵커(data-hc)로 복원 가능하게. idx = 논리 셀 인덱스
+        // (getCellInfo/getTextInCell 과 동일) → 병합표도 정확히 짝지어진다. 정렬은 시각값(vAlign) 우선.
+        inner += `<div data-hc="${s},${p},${t.ci},${idx},${cp}" style="${paraEditCss(cc, pcp, vAlign)}">${esc(text) || "<br>"}</div>`;
+        // 셀이 품은 중첩표(표 안의 표)도 편집 가능하게.
+        inner += renderNestedTablesEditable(doc, s, p, [[t.ci, idx, cp]]);
+      } else {
+        inner += renderPara(text, cc, pcp);
+      }
     }
     cells.push({
       row: info?.row ?? 0, col: info?.col ?? 0,
@@ -453,8 +600,11 @@ function renderRhwpTable(doc: RhwpDoc, s: number, p: number, t: TableRef): strin
       .join("");
     trs += `<tr>${tds}</tr>\n`;
   }
-  const widthStyle = totalW > 0 ? ` style="width:${totalW}px"` : "";
-  return `<table class="hp-tbl"${widthStyle}>${colgroup}<tbody>\n${trs}</tbody></table>`;
+  const sty = (totalW > 0 ? `width:${totalW}px;` : "") + (opts.editable ? "table-layout:fixed" : "");
+  const widthStyle = sty ? ` style="${sty}"` : "";
+  const cls = opts.editable ? "hp-tbl hwp-tbl" : "hp-tbl";
+  const anchor = opts.editable ? ` data-ht="${s},${p},${t.ci}"` : "";
+  return `<table class="${cls}"${anchor}${widthStyle}>${colgroup}<tbody>\n${trs}</tbody></table>`;
 }
 
 /**

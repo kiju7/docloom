@@ -1,0 +1,21 @@
+import { readFileSync } from "node:fs";
+import { loadRhwp } from "./rhwpNode.js";
+import { readZip } from "../src/core/zip.js";
+const Ctor = (await loadRhwp())!;
+const doc:any = new Ctor(new Uint8Array(readFileSync(process.argv[2]!)));
+const out = doc.exportHwpx();
+const parts = readZip(out);
+const hx = new TextDecoder().decode(parts["Contents/header.xml"]||new Uint8Array());
+const bfCount = (hx.match(/<hh:borderFill\b/g)||[]).length;
+const lines = (hx.match(/<hh:(left|right|top|bottom)Border\b[^>]*>/g)||[]);
+const realLines = lines.filter(l=>!/type="NONE"/i.test(l) && !/type="0"/.test(l));
+const fills = (hx.match(/<hh:fillBrush\b[\s\S]{0,120}?<\/hh:fillBrush>|<hh:fillBrush\b[^>]*\/>/g)||[]);
+const winFill = (hx.match(/<hc:winBrush\b[^>]*faceColor="(?!#FFFFFF|none)/gi)||[]).length;
+console.log(`borderFill 정의 수: ${bfCount}`);
+console.log(`border 라인 총 ${lines.length}개, 그중 비-NONE(실선) ${realLines.length}개`);
+console.log(`fillBrush ${fills.length}개, 유색 winBrush ${winFill}개`);
+console.log("샘플 borderFill:", (hx.match(/<hh:borderFill\b[\s\S]{0,400}?<\/hh:borderFill>/)||["(없음)"])[0].replace(/\s+/g," ").slice(0,380));
+// paraPr 들의 borderFillIDRef 분포
+const refs = [...hx.matchAll(/<hh:paraPr\b[^>]*borderFillIDRef="(\d+)"/g)].map(m=>m[1]);
+const dist:Record<string,number>={}; refs.forEach(r=>dist[r]=(dist[r]||0)+1);
+console.log("paraPr borderFillIDRef 분포:", JSON.stringify(dist));
