@@ -20,6 +20,7 @@
     "hwp:verify": "tsx scripts/hwp-verify.ts",
     "rhwp:vendor": "mkdir -p vendor/rhwp && cp \"${RHWP_SRC:-../rhwp}/pkg/rhwp.js\" \"${RHWP_SRC:-../rhwp}/pkg/rhwp_bg.wasm\" \"${RHWP_SRC:-../rhwp}/pkg/rhwp.d.ts\" \"${RHWP_SRC:-../rhwp}/pkg/rhwp_bg.wasm.d.ts\" vendor/rhwp/ && git -C \"${RHWP_SRC:-../rhwp}\" rev-parse HEAD > vendor/rhwp/RHWP_BUILD.txt && echo \"vendored rhwp $(cat vendor/rhwp/RHWP_BUILD.txt)\"",
     "serve": "node server.mjs",
+    "mcp": "node mcp/docloom-mcp.mjs",
     "demo:rhwp": "cp vendor/rhwp/rhwp.js vendor/rhwp/rhwp_bg.wasm demo/",
     "demo:build": "esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=demo/docloom.mjs && npm run demo:rhwp",
     "demo": "npm run demo:build && echo '데모 준비 완료 → 브라우저에서 demo/index.html 열기 (또는: npx serve demo)'"
@@ -34,11 +35,13 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@rhwp/core": "^0.7.13",
     "@rhwp/editor": "^0.7.13",
     "fast-xml-parser": "^4.5.0",
     "fflate": "^0.8.2",
-    "node-html-parser": "^6.1.13"
+    "node-html-parser": "^6.1.13",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
