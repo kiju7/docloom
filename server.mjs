@@ -19,7 +19,22 @@ const readBody = (req) =>
     req.on("end", () => resolve(Buffer.concat(chunks)));
   });
 
+// CORS: 브라우저(다른 오리진)에서 fetch 로 직접 호출할 수 있게 허용한다.
+// ALLOW_ORIGIN 환경변수로 특정 도메인만 열 수 있고, 미설정 시 전체(*) 허용.
+const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
+
 createServer(async (req, res) => {
+  // 모든 응답에 CORS 헤더를 붙인다.
+  res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
+  res.setHeader("Access-Control-Max-Age", "86400");
+  // 프리플라이트(OPTIONS)는 본문 없이 204 로 바로 응답.
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    return res.end();
+  }
   try {
     if (req.method !== "POST") {
       res.statusCode = 404;
