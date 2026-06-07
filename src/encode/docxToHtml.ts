@@ -19,6 +19,7 @@ import {
 import type { DocModel, Block, Run } from "../model/docModel.js";
 import type { Manifest } from "../model/manifest.js";
 import { readDocxZip, partToText } from "../docx/zip.js";
+import { buildDocxFrozenImages } from "../docx/images.js";
 import {
   DOCUMENT_PART,
   parseXml,
@@ -101,7 +102,9 @@ export function encodeToHtml(docx: Uint8Array, opts: EncodeOptions = {}): Encode
     paletteId: palette.id,
   };
 
-  const html = serializeModelToHtml(model, palette);
+  // frozen 그림 런 → 실제 이미지 <img>(표시용; 왕복은 frozen 토큰으로 보존).
+  const frozenImgs = buildDocxFrozenImages(frozen, originalParts);
+  const html = serializeModelToHtml(model, palette, frozenImgs);
   return { html, manifest, model };
 }
 
@@ -177,9 +180,22 @@ function frozenLabel(tag: string): string {
 // ── 직렬화 (DocModel → HTML) ─────────────────────────────────────────────
 
 /** 제약 규칙: 허용 태그 + s- class 만, 인라인스타일 금지. */
-export function serializeModelToHtml(model: DocModel, palette: Palette): string {
-  const body = model.blocks.map((b) => serializeBlock(b, palette)).join("\n");
-  return `<div class="docloom-doc" data-palette="${palette.id}">\n${body}\n</div>`;
+// frozen 런/블록 표시를 라벨 대신 실제 <img> 로 바꾸기 위한 token→imgHTML 맵.
+// 직렬화는 동기라 모듈 변수로 전달(스레딩 최소화). 호출 시작에 설정, 끝에 해제.
+let frozenImgMap: Map<string, string> | null = null;
+
+export function serializeModelToHtml(
+  model: DocModel,
+  palette: Palette,
+  frozenImgs?: Map<string, string>,
+): string {
+  frozenImgMap = frozenImgs && frozenImgs.size ? frozenImgs : null;
+  try {
+    const body = model.blocks.map((b) => serializeBlock(b, palette)).join("\n");
+    return `<div class="docloom-doc" data-palette="${palette.id}">\n${body}\n</div>`;
+  } finally {
+    frozenImgMap = null;
+  }
 }
 
 function serializeBlock(block: Block, palette: Palette): string {
@@ -196,10 +212,11 @@ function serializeBlock(block: Block, palette: Palette): string {
       return `<li class="${classFromStyleKey(block.styleKey)}"${ppAttr(block.propsRef)}>${serializeRuns(block.runs)}</li>`;
     case "table":
       return serializeTable(block, palette);
-    case "frozen":
-      return `<div class="s-frozen" data-frozen="${block.refId}" contenteditable="false">${escapeHtml(
-        block.label ?? "[보존된 원본 요소]",
-      )}</div>`;
+    case "frozen": {
+      // 그림이면 실제 <img>, 아니면 라벨. 토큰(data-frozen)은 유지 → 왕복 무손실.
+      const inner = frozenImgMap?.get(block.refId) ?? escapeHtml(block.label ?? "[보존된 원본 요소]");
+      return `<div class="s-frozen" data-frozen="${block.refId}" contenteditable="false">${inner}</div>`;
+    }
   }
 }
 
@@ -211,9 +228,10 @@ function ppAttr(propsRef: string | undefined): string {
 function serializeRuns(runs: Run[]): string {
   return runs
     .map((r) => {
-      // frozen 런(이미지·도형): LLM 엔 짧은 자리표시자만 — 이미지 바이트는 안 나간다
+      // frozen 런(이미지·도형): 그림이면 실제 <img>, 아니면 자리표시자. 토큰 유지 → 왕복 무손실.
       if (r.frozenRef) {
-        return `<span data-frozen-run="${r.frozenRef}" contenteditable="false">${escapeHtml(r.label ?? "[개체]")}</span>`;
+        const inner = frozenImgMap?.get(r.frozenRef) ?? escapeHtml(r.label ?? "[개체]");
+        return `<span data-frozen-run="${r.frozenRef}" contenteditable="false">${inner}</span>`;
       }
       let t = escapeHtml(r.text).replace(/\n/g, "<br/>");
       for (const m of r.marks ?? []) {
