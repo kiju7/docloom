@@ -32,6 +32,12 @@ function sectionCount(doc: RhwpDocFull): number {
   return Math.max(1, info?.sectionCount ?? 1);
 }
 
+// 표의 가장 긴 셀 문단에서 뽑은 **분별력 있는 짧은 접두**(표 렌더 여부 지문).
+// ⚠ 예전엔 최장 문단 전체(수백 자)를 연속 부분문자열로 검사했는데, 셀의 긴 문단이 본문의
+//   유사 구절과 헷갈리거나 셀 문단 분절 순서가 data-API 와 달라 **거짓양성**이 났다(KKITS:
+//   표 텍스트가 다 렌더됐는데도 260자 연속매칭 실패). 짧고 분별력 있는 접두만 보면 진짜
+//   드롭(접두조차 부재)은 잡고 분절 차이 거짓양성은 사라진다. (28자 한글/영문은 충분히 고유.)
+const PROBE_LEN = 28;
 function longestCellProbe(doc: RhwpDocFull, s: number, p: number, ci: number): string {
   const dim = pj<{ cellCount: number }>(safe(() => doc.getTableDimensions(s, p, ci)));
   let best = "";
@@ -44,7 +50,7 @@ function longestCellProbe(doc: RhwpDocFull, s: number, p: number, ci: number): s
       if (t.length > best.length) best = t;
     }
   }
-  return best;
+  return best.slice(0, PROBE_LEN);
 }
 
 function countImageNodes(n: TNode | null): number {
