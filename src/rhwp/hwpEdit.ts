@@ -1034,6 +1034,7 @@ interface TreeCtx {
   sec: number;                 // 섹션(보통 0)
   pageW: number; pageH: number; // 용지 px(쪽배경 그림 판정용)
   bgLayers: string[];          // 페이지 대부분 덮는 그림(테두리/워터마크) → 절대배치 배경으로 올림
+  skipImage?: TNode;           // 쪽배경 페이지에서 배경 그림 노드(절대배치로 따로 그림)를 흐름에서 제외
 }
 
 /**
@@ -1215,8 +1216,9 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
     case "Table":
       return renderTreeTable(node, ctx, !inCell);
     case "Image": {
+      if (ctx.skipImage && node === ctx.skipImage) return ""; // 쪽배경 그림은 절대배치로 따로 그림
       const uri = imageSrcFor(node, ctx); // 위치(bbox) 매칭 → 정답 바이트(폴백: 풀)
-      if (uri === undefined) return "";
+      if (!uri) return "";
       const b = node.bbox;
       // (쪽배경 그림이 있는 페이지는 renderAbsBgPage 가 따로 처리 → 여기 안 옴.)
       const dim = b && b.w > 0 && b.h > 0 ? `width:${Math.round(b.w)}px;height:${Math.round(b.h)}px;` : "";
@@ -1435,26 +1437,31 @@ function renderBgPageFlow(tree: TNode, bg: TNode, ctx: TreeCtx): string {
     ? `<img class="hp-bg" alt="" style="left:${Math.round(bb.x)}px;top:${Math.round(bb.y)}px;` +
       `width:${Math.round(bb.w)}px;height:${Math.round(bb.h)}px" src="${bgUri}">`
     : "";
-  // 가로 내용영역 = 글 있는 TextLine bbox 의 중앙값(셀 안 실제 글 영역).
-  const xs: number[] = [], rs: number[] = [];
+  // 최상위 콘텐츠 표 수집.
+  const tables: TNode[] = [];
   (function f(n: TNode) {
     if (!n || typeof n !== "object") return;
-    if (n.type === "TextLine" && n.bbox && (n.children ?? []).some((c) => c.type === "TextRun" && (c.text ?? "").length)) {
-      xs.push(n.bbox.x); rs.push(n.bbox.x + n.bbox.w);
-    }
+    if (n.type === "Table" && typeof n.pi === "number") tables.push(n);
     for (const k of (n.children ?? [])) f(k);
   })(tree);
-  const cx = median(xs), cw = Math.max(1, median(rs) - cx);
-  // 텍스트 = 표 셀의 실제 문단값(정렬·글자속성·텍스트) 그대로.
-  let table: TNode | null = null;
-  (function f(n: TNode) {
-    if (!n || typeof n !== "object") return;
-    if (n.type === "Table" && typeof n.pi === "number" && !table) table = n;
-    for (const k of (n.children ?? [])) f(k);
-  })(tree);
-  let body = "";
-  const t = table as TNode | null;
-  if (t && typeof t.pi === "number" && typeof t.ci === "number") {
+
+  // ⚠ 단일 표(상장 등) → 셀 문단값으로 중앙배치(쪽배경 페이지는 트리 bbox 정렬추측이 틀려서
+  //   getCell*PropertiesAt 실값을 씀). **복수 표/복합 콘텐츠**(예: 제안요청서 = 표 2개 + 제목)
+  //   → 전체 트리를 흐름 렌더(배경 그림만 절대배치로 빼고 스킵). 예전엔 첫 표 하나만 그려
+  //   나머지 표·평문이 통째로 드롭됐다(텍스트 46.5%만 렌더).
+  const t = tables.length === 1 ? tables[0]! : null;
+  if (t && typeof t.ci === "number") {
+    // 가로 내용영역 = 글 있는 TextLine bbox 의 중앙값(셀 안 실제 글 영역).
+    const xs: number[] = [], rs: number[] = [];
+    (function f(n: TNode) {
+      if (!n || typeof n !== "object") return;
+      if (n.type === "TextLine" && n.bbox && (n.children ?? []).some((c) => c.type === "TextRun" && (c.text ?? "").length)) {
+        xs.push(n.bbox.x); rs.push(n.bbox.x + n.bbox.w);
+      }
+      for (const k of (n.children ?? [])) f(k);
+    })(tree);
+    const cx = median(xs), cw = Math.max(1, median(rs) - cx);
+    let body = "";
     const dims = ctx.doc.getTableDimensions ? pj<any>(safe(() => ctx.doc.getTableDimensions!(ctx.sec, t.pi!, t.ci!))) : null;
     const cells = typeof dims?.cellCount === "number" ? dims.cellCount : 1;
     for (let cell = 0; cell < cells; cell++) {
@@ -1467,9 +1474,15 @@ function renderBgPageFlow(tree: TNode, bg: TNode, ctx: TreeCtx): string {
         body += renderPara(text, cc, pcp);
       }
     }
+    return `<div class="hp-page hp-bgpage">${bgImg}` +
+      `<div class="hp-body" style="margin-left:${Math.round(cx)}px;width:${Math.round(cw)}px">${body}</div></div>`;
   }
-  return `<div class="hp-page hp-bgpage">${bgImg}` +
-    `<div class="hp-body" style="margin-left:${Math.round(cx)}px;width:${Math.round(cw)}px">${body}</div></div>`;
+
+  // 복수 표/복합 콘텐츠: 배경은 절대배치(뒤), 본문은 전체 트리를 흐름 렌더(배경 그림 노드만 스킵).
+  ctx.skipImage = bg;
+  const content = renderTreeNode(tree, ctx, false);
+  ctx.skipImage = undefined;
+  return `<div class="hp-page hp-bgpage">${bgImg}<div class="hp-body">${content}</div></div>`;
 }
 
 /**
