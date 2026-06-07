@@ -1056,8 +1056,20 @@ function buildPageImages(doc: RhwpDoc, pg: number): PageImg[] {
   return out;
 }
 
-/** 트리 Image 노드 bbox 에 가장 가까운(미사용) 페이지 이미지 src(없으면 BinData 풀 폴백). */
-function imageSrcFor(node: TNode, ctx: TreeCtx): string | undefined {
+/** 투명 1×1 GIF — 바이트 없는(빈) 그림틀의 자리표시자. 트리 Image 노드는 절대 드롭하지 않는다. */
+const TRANSPARENT_PX =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+/**
+ * 트리 Image 노드 → 표시할 src. 우선순위:
+ *   ① bbox 로 renderPageHtml 의 <img>(정답 바이트) 매칭
+ *   ② renderPageHtml 이 이 페이지에 <img> 를 **하나도** 못 내보낸 경우(=floating 등으로 미지원)
+ *      에 한해 BinData 풀에서 문서순으로 보충(순서 근사). renderPageHtml 이 일부라도 <img> 를
+ *      낸 페이지에서 매칭에 실패한 노드는 "바이트 없는 빈 그림틀"(binItemID=0 placeholder 등)이
+ *      므로 풀에서 엉뚱한 바이트를 빌리지 않고 ③ 투명 자리표시자로 둔다.
+ *   ③ 투명 1×1 자리표시자(드롭 금지). 어느 경우든 <img> 는 항상 1개 나간다.
+ */
+function imageSrcFor(node: TNode, ctx: TreeCtx): string {
   const b = node.bbox;
   if (b) {
     let best = -1, bestD = 5; // 5px 임계(같은 레이아웃 엔진이라 보통 0.1px 이내로 일치)
@@ -1069,10 +1081,13 @@ function imageSrcFor(node: TNode, ctx: TreeCtx): string | undefined {
     }
     if (best >= 0) { ctx.pageImgs[best]!.used = true; return ctx.pageImgs[best]!.src; }
   }
-  // 폴백: BinData 풀(순서 부정확하지만 renderPageHtml 미지원/매칭실패 시 최후수단).
-  const uri = ctx.pool[ctx.cur.i];
-  if (uri !== undefined) { ctx.cur.i++; return uri; }
-  return undefined;
+  // renderPageHtml 이 이 페이지에 <img> 를 0개 낸 경우에만 BinData 풀로 보충(미지원/실패 폴백).
+  // (일부라도 낸 페이지의 미매칭 노드는 빈 그림틀이므로 풀에서 빌리지 않는다.)
+  if (ctx.pageImgs.length === 0) {
+    const uri = ctx.pool[ctx.cur.i];
+    if (uri !== undefined) { ctx.cur.i++; return uri; }
+  }
+  return TRANSPARENT_PX; // 바이트 없음 → 투명 자리표시자(노드 드롭 방지)
 }
 
 /**
@@ -1381,16 +1396,27 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
 function findFullPageBg(root: TNode, pageW: number, pageH: number): TNode | null {
   let best: TNode | null = null;
   let bestArea = 0;
+  let qualifying = 0; // 페이지 60%↑ 그림 개수
   (function walk(n: TNode) {
     if (!n || typeof n !== "object") return;
     const b = n.bbox;
-    if (n.type === "Image" && b && b.w >= pageW * 0.6 && b.h >= pageH * 0.6 && b.w * b.h > bestArea) {
-      bestArea = b.w * b.h;
-      best = n;
+    // 진짜 쪽배경(상장 테두리·워터마크)은 페이지 폭/높이의 60~110% 안에서 페이지를 "감싼다".
+    // 페이지보다 훨씬 큰 그림(예: 용지폭 320%·높이 105%로 넘치는 본문 스크린샷)은 배경이
+    // 아니라 콘텐츠이므로 쪽배경 처리에서 제외(그래야 같은 페이지의 다른 그림이 안 드롭된다).
+    if (
+      n.type === "Image" && b &&
+      b.w >= pageW * 0.6 && b.h >= pageH * 0.6 &&
+      b.w <= pageW * 1.1 && b.h <= pageH * 1.1
+    ) {
+      qualifying++;
+      if (b.w * b.h > bestArea) { bestArea = b.w * b.h; best = n; }
     }
     for (const k of (n.children ?? [])) walk(k);
   })(root);
-  return best;
+  // ⚠ 진짜 쪽배경(상장 테두리·워터마크)은 페이지당 **하나**다. 큰 그림이 2개 이상이면
+  //   배경이 아니라 **큰 콘텐츠 도판들**(예: "8-2 번문제 해석" 풀이 도판 4장)이므로 쪽배경
+  //   처리하면 안 된다(하나만 배경 깔고 나머지 드롭됨) → null 로 일반 흐름배치 시킨다.
+  return qualifying >= 2 ? null : best;
 }
 
 const median = (a: number[]): number => (a.length ? a.slice().sort((x, y) => x - y)[a.length >> 1]! : 0);
