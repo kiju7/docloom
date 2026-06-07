@@ -1035,6 +1035,7 @@ interface TreeCtx {
   pageW: number; pageH: number; // 용지 px(쪽배경 그림 판정용)
   bgLayers: string[];          // 페이지 대부분 덮는 그림(테두리/워터마크) → 절대배치 배경으로 올림
   skipImage?: TNode;           // 쪽배경 페이지에서 배경 그림 노드(절대배치로 따로 그림)를 흐름에서 제외
+  linePitch?: Map<TNode, number>; // TextLine → 다음 줄까지의 세로간격(빈 줄 높이 보정용, 표지 간격 보존)
 }
 
 /**
@@ -1055,6 +1056,28 @@ function buildPageImages(doc: RhwpDoc, pg: number): PageImg[] {
     if (src && isFinite(x) && isFinite(y)) out.push({ x, y, src, used: false });
   }
   return out;
+}
+
+/**
+ * 페이지의 TextLine → 다음(아래) 줄까지의 세로간격(pitch) 맵.
+ * 빈 줄을 글자높이(bbox.h)가 아니라 이 pitch 로 렌더하면 원본 줄간격이 보존돼, 표지처럼
+ * 빈 줄로 아래까지 밀어둔 글(예: 하단 회사명)이 중간으로 올라오지 않는다. y 순으로 인접 줄
+ * 간격을 재되, 호출측이 "줄 같은 간격"만 채택(과도하면 셀/영역 경계이므로 폴백)하게 값만 준다.
+ */
+function buildLinePitch(tree: TNode): Map<TNode, number> {
+  const lines: TNode[] = [];
+  (function collect(n: TNode) {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "TextLine" && n.bbox) lines.push(n);
+    for (const k of (n.children ?? [])) collect(k);
+  })(tree);
+  lines.sort((a, b) => a.bbox!.y - b.bbox!.y);
+  const m = new Map<TNode, number>();
+  for (let i = 0; i < lines.length - 1; i++) {
+    const gap = lines[i + 1]!.bbox!.y - lines[i]!.bbox!.y;
+    if (gap > 0) m.set(lines[i]!, gap);
+  }
+  return m;
 }
 
 /** 투명 1×1 GIF — 바이트 없는(빈) 그림틀의 자리표시자. 트리 Image 노드는 절대 드롭하지 않는다. */
@@ -1264,8 +1287,19 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
       const styles: string[] = [];
       const align = lineAlign(node);
       if (align) styles.push(`text-align:${align}`);
-      // 빈 줄(원본의 빈 문단)은 그 높이만큼 세로공간 확보 → 원본 줄간격/배치 보존.
-      if (!html && node.bbox && node.bbox.h > 0) styles.push(`height:${Math.round(node.bbox.h)}px`);
+      // 세로 리듬 보존: 줄을 **다음 줄까지의 간격(pitch)** 만큼 슬롯으로 차지시킨다.
+      // ⚠ 글자높이만 쓰면 줄간격이 압축돼, 표지처럼 빈/공백 줄로 아래까지 밀어둔 글(하단 회사명
+      //   등)이 중간으로 올라온다. ⚠ "빈 줄"이 사실 공백 런을 담아 html 이 비지 않는 경우도 많으니
+      //   내용 유무와 무관하게 적용. 셀 안(표)·과도한 간격(영역 경계)은 제외해 표는 안 건드린다.
+      const bh = node.bbox?.h ?? 0;
+      const pitch = !inCell && node.bbox ? ctx.linePitch?.get(node) : undefined;
+      const slot = pitch && pitch >= bh && pitch <= bh * 3 + 16 ? pitch : undefined;
+      if (!html) {
+        const h = slot ?? bh; // 완전 빈 줄: 높이 확보
+        if (h > 0) styles.push(`height:${Math.round(h)}px`);
+      } else if (slot) {
+        styles.push(`min-height:${Math.round(slot)}px`); // 내용/공백 줄: 원본 줄높이 슬롯(텍스트는 상단)
+      }
       const style = styles.length ? ` style="${styles.join(";")}"` : "";
       return `<div class="hp-ln"${style}>${html || "<br>"}</div>`;
     }
@@ -1515,6 +1549,7 @@ export function hwpToTreePreviewHtml(
     const ctx: TreeCtx = {
       doc, styles: buildRunStyles(doc, pg), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
+      linePitch: buildLinePitch(tree),
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);
