@@ -278,7 +278,7 @@
   import { previewHtml, adapterFor, encode, decode, editablePreviewHtml, formatFromFilename,
            extractPdfModel, pdfModelToPreviewHtml, buildPdfFromModel,
            extendPdfModel, pdfModelPagesHtml, pdfModelTotalPages, pdfModelFontFaceCss,
-           hwpToEditableHtml, applyHwpEdits, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260608nowrap";
+           hwpToEditableHtml, applyHwpEdits, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260609docxmarkers";
   // 한글(.hwp/.hwpx) 충실 렌더 — rhwp(Rust+WASM, 소스빌드 vendor/rhwp) 의 절대배치 HTML 렌더.
   import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260602fixes";
 
@@ -454,7 +454,9 @@
       // ⚠ html 제외: html 의 encode 출력은 docloom 마크업이 아니라 문서 자신의 임의 HTML 이라,
       //    직접편집 셸(.docloom-doc 용지 CSS)에 끼우면 원본 <head>/<style> 이 사라져 이상하게 보인다.
       //    → faithful previewHtml(원본 그대로 자기 CSS)로 미리보고, 편집은 md 처럼 "편집&복원" 토글로.
-      const isDirectEdit = ["csv", "docx", "doc", "txt"].includes(fmt);
+      // docx 는 충실 미리보기(docxToPreviewHtml: 원본 글꼴·크기·색·글머리표·번호·머리말)로 보여주고,
+      // 편집은 다른 충실미리보기 포맷처럼 "편집&복원" 토글(encode→수정→decode)로 분리한다.
+      const isDirectEdit = ["csv", "doc", "txt"].includes(fmt);
       pdfModel = null; directEdit = null;
       let html;
       if (isPdf) {
@@ -473,10 +475,10 @@
         html = previewHtml(bytes, { title: file.name, format: hint });
       }
       lastHtml = html;
-      // 한글·PDF·직접편집은 내용이 커질 수 있어 srcdoc 대신 Blob URL(잘림 방지). 모두 same-origin 이라
-      // 부모가 iframe 의 편집된 글자(contenteditable)를 읽을 수 있다.
+      // 한글·PDF·직접편집·docx(이미지 많을 수 있음)는 내용이 커질 수 있어 srcdoc 대신
+      // Blob URL(잘림 방지). 모두 same-origin 이라 부모가 iframe 내용을 읽을 수 있다.
       if (lastFrameUrl) { URL.revokeObjectURL(lastFrameUrl); lastFrameUrl = null; }
-      if (isHangul || isPdf || isDirectEdit) {
+      if (isHangul || isPdf || isDirectEdit || fmt === "docx") {
         frame.removeAttribute("srcdoc");
         lastFrameUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
         frame.src = lastFrameUrl;
