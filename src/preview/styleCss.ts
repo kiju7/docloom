@@ -199,6 +199,12 @@ function readPPr(pPr: XmlNode | undefined): TextProps {
     if (Number.isFinite(after)) p.marginBottomPt = after / 20;
     const before = Number(attrOf(spacing, "w:before"));
     if (Number.isFinite(before)) p.marginTopPt = before / 20;
+    // 줄간격(w:line)은 의도적으로 CSS 로 내보내지 않는다.
+    // Word 의 "한 줄"(line=240~276, lineRule=auto)은 폰트 메트릭 기반 leading 이라
+    // CSS line-height 1.0~1.15 보다 실제로 더 넉넉하게 렌더된다. truth PDF 대비
+    // 그대로 적용하면 줄이 너무 빽빽해져 충실도(SSIM)가 떨어진다(실측 확인). 페이지
+    // 레이아웃의 넉넉한 기본 line-height(1.7)를 유지하는 편이 truth 에 더 가깝다.
+    // exact/atLeast 절대 줄간격 지원은 별도 보정계수 검증 후 도입 — 백로그.
   }
   const ind = findChild(kids, "w:ind");
   if (ind) {

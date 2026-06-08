@@ -238,6 +238,19 @@ const PAGINATOR_JS = `
     if (footerHtml.trim()){ var f=document.createElement('div'); f.className='page-footer'; f.innerHTML=footerHtml; page.appendChild(f); }
     if (SHOW_AID){ var a=document.createElement('div'); a.className='page-aid'; page.appendChild(a); }
     pagesEl.appendChild(page);
+    // 머리말/꼬리말이 여백 밴드보다 크면 본문을 밀어 겹침 방지(워드처럼 본문 시작을 내림).
+    // 머리말은 top:--hy 에 절대배치되므로 padding-top 을 키워도 머리말은 그대로, 본문만 내려간다.
+    var rootCS = getComputedStyle(document.documentElement);
+    var num = function(s){ return parseFloat(s) || 0; };
+    var GAP = 6;
+    if (h){
+      var need = num(rootCS.getPropertyValue('--hy')) + h.offsetHeight + GAP;
+      if (need > num(getComputedStyle(page).paddingTop)) page.style.paddingTop = need + 'px';
+    }
+    if (f){
+      var needB = num(rootCS.getPropertyValue('--fy')) + f.offsetHeight + GAP;
+      if (needB > num(getComputedStyle(page).paddingBottom)) page.style.paddingBottom = needB + 'px';
+    }
     return content;
   }
 

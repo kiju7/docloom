@@ -39,6 +39,7 @@ interface Ctx {
   parts: Record<string, Uint8Array>;
   numbering: Numbering;
   counters: Map<string, number[]>; // numId → 레벨별 카운터
+  styleNum: Map<string, { numId: string; ilvl: number }>; // styleId → 스타일에 박힌 numPr
 }
 
 export interface RenderResult {
@@ -60,6 +61,7 @@ export function renderPreviewBody(parts: Record<string, Uint8Array>, palette: Pa
     parts,
     numbering: buildNumbering(parts, dec),
     counters: new Map(),
+    styleNum: buildStyleNum(parts, dec),
   };
 
   const doc = parseXml(dec.decode(parts["word/document.xml"]!));
@@ -123,7 +125,7 @@ function renderParagraph(p: XmlNode, ctx: Ctx): string {
   const tag = htmlTagFromStyleKey(ctx.palette, styleKey);
 
   const style = paragraphInlineStyle(pPr);
-  const marker = listMarker(pPr, ctx);
+  const marker = listMarker(pPr, styleId, ctx);
   const inner = renderRuns(p, ctx);
 
   const cls = classFromStyleKey(styleKey);
@@ -372,6 +374,7 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
 interface NumLevel {
   numFmt: string;
   lvlText: string;
+  bulletFont?: string; // 글머리표 글리프 폰트(Wingdings/Symbol 판별용)
 }
 interface Numbering {
   // numId → ilvl → level
@@ -398,7 +401,12 @@ function buildNumbering(parts: Record<string, Uint8Array>, dec: InstanceType<typ
       const lk = childrenOf(lvl);
       const numFmt = attrOf(findChild(lk, "w:numFmt") ?? {}, "w:val") ?? "decimal";
       const lvlText = attrOf(findChild(lk, "w:lvlText") ?? {}, "w:val") ?? "%1.";
-      lvls.set(ilvl, { numFmt, lvlText });
+      const rPr = findChild(lk, "w:rPr");
+      const rFonts = rPr ? findChild(childrenOf(rPr), "w:rFonts") : undefined;
+      const bulletFont = rFonts
+        ? attrOf(rFonts, "w:ascii") ?? attrOf(rFonts, "w:hAnsi") ?? attrOf(rFonts, "w:cs")
+        : undefined;
+      lvls.set(ilvl, { numFmt, lvlText, bulletFont });
     }
     abstract.set(aId, lvls);
   }
@@ -413,18 +421,80 @@ function buildNumbering(parts: Record<string, Uint8Array>, dec: InstanceType<typ
   return { levels };
 }
 
-/** numPr → 마커 HTML. 글머리기호(•) 또는 번호(카운터). 없으면 "". */
-function listMarker(pPr: XmlNode | undefined, ctx: Ctx): string {
-  if (!pPr) return "";
-  const numPr = findChild(childrenOf(pPr), "w:numPr");
-  if (!numPr) return "";
-  const numId = attrOf(findChild(childrenOf(numPr), "w:numId") ?? {}, "w:val");
-  const ilvl = Number(attrOf(findChild(childrenOf(numPr), "w:ilvl") ?? {}, "w:val") ?? "0");
-  if (!numId) return "";
+/** styles.xml 의 문단 스타일에 직접 박힌 numPr → styleId 맵. */
+function buildStyleNum(
+  parts: Record<string, Uint8Array>,
+  dec: InstanceType<typeof TextDecoder>,
+): Map<string, { numId: string; ilvl: number }> {
+  const map = new Map<string, { numId: string; ilvl: number }>();
+  const buf = parts["word/styles.xml"];
+  if (!buf) return map;
+  const tree = parseXml(dec.decode(buf));
+  const root = tree.find((n) => tagOf(n) === "w:styles");
+  if (!root) return map;
+  for (const st of findChildren(childrenOf(root), "w:style")) {
+    const styleId = attrOf(st, "w:styleId");
+    if (!styleId) continue;
+    const pPr = findChild(childrenOf(st), "w:pPr");
+    if (!pPr) continue;
+    const numPr = findChild(childrenOf(pPr), "w:numPr");
+    if (!numPr) continue;
+    const numId = attrOf(findChild(childrenOf(numPr), "w:numId") ?? {}, "w:val");
+    if (!numId) continue;
+    const ilvl = Number(attrOf(findChild(childrenOf(numPr), "w:ilvl") ?? {}, "w:val") ?? "0");
+    map.set(styleId, { numId, ilvl });
+  }
+  return map;
+}
+
+const SYMBOL_BULLETS: Record<number, string> = {
+  0xf0b7: "•", // Symbol/Wingdings: 둥근 점
+  0x00b7: "·",
+  0xf0a7: "▪", // Wingdings: 작은 검은 사각
+  0xf06e: "■", // Wingdings 'n': 검은 사각
+  0xf06c: "●", // Wingdings 'l': 큰 검은 원
+  0xf071: "◆", // Wingdings 'q': 검은 마름모
+  0xf075: "◆",
+  0xf0d8: "➢", // Wingdings: 화살촉
+  0xf0fc: "✔",
+  0xf0a8: "▪",
+};
+
+function isSymbolFont(f?: string): boolean {
+  return !!f && /wingding|webding|symbol|marlett/i.test(f);
+}
+
+/** 글머리표 글리프: 실제 lvlText 를 살리되, 심볼폰트/사유영역 문자는 유니코드 불릿으로 매핑. */
+function bulletGlyph(lvlText: string, font?: string): string {
+  if (!lvlText) return "•";
+  const cp = lvlText.codePointAt(0)!;
+  if (isSymbolFont(font) || (cp >= 0xf000 && cp <= 0xf0ff)) {
+    return SYMBOL_BULLETS[cp] ?? "•";
+  }
+  return lvlText; // "-", "*", "o", "▪" 등 일반 글자 그대로
+}
+
+/** numPr → 마커 HTML. 글머리기호(실제 lvlText) 또는 번호(카운터). 없으면 "". */
+function listMarker(pPr: XmlNode | undefined, styleId: string | undefined, ctx: Ctx): string {
+  let numId: string | undefined;
+  let ilvl = 0;
+  const numPr = pPr ? findChild(childrenOf(pPr), "w:numPr") : undefined;
+  if (numPr) {
+    numId = attrOf(findChild(childrenOf(numPr), "w:numId") ?? {}, "w:val");
+    ilvl = Number(attrOf(findChild(childrenOf(numPr), "w:ilvl") ?? {}, "w:val") ?? "0");
+  } else if (styleId && ctx.styleNum.has(styleId)) {
+    const s = ctx.styleNum.get(styleId)!;
+    numId = s.numId;
+    ilvl = s.ilvl;
+  }
+  if (!numId || numId === "0") return ""; // numId 0 = 번호 제거(Word 관례)
   const level = ctx.numbering.levels.get(numId)?.get(ilvl);
   if (!level) return "";
 
-  if (level.numFmt === "bullet") return `<span class="docloom-marker">•</span> `;
+  if (level.numFmt === "none") return "";
+  if (level.numFmt === "bullet") {
+    return `<span class="docloom-marker">${escapeHtml(bulletGlyph(level.lvlText, level.bulletFont))}</span> `;
+  }
 
   // 번호: numId 별 카운터 배열 유지
   let counts = ctx.counters.get(numId);

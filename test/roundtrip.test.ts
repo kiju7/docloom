@@ -46,6 +46,18 @@ describe("docx ↔ html 왕복", () => {
     void text;
   });
 
+  it.runIf(hasSample)("편집기가 data-pp/data-rp 토큰을 떨궈도 decode 가 깨지지 않고 텍스트를 보존한다", () => {
+    const first = encodeToHtml(loadSample());
+    const origText = first.model.blocks.flatMap((b) => ("runs" in b ? b.runs.map((r) => r.text) : [])).join("");
+    // 실제 contenteditable 편집이 흔히 떨구는 토큰 속성 제거
+    const mangled = first.html.replace(/ data-pp="[^"]*"/g, "").replace(/ data-rp="[^"]*"/g, "");
+    const out = decodeToDocx(mangled, first.manifest);
+    expect(out.byteLength).toBeGreaterThan(0);
+    const re = encodeToHtml(out);
+    const reText = re.model.blocks.flatMap((b) => ("runs" in b ? b.runs.map((r) => r.text) : [])).join("");
+    expect(reText).toBe(origText);
+  });
+
   it("팔레트 불일치면 decode 가 거부한다", () => {
     const fakeManifest = {
       version: 1 as const,
