@@ -29,9 +29,9 @@ import {
 import type { OfficeFormat } from "./index.js";
 import type { Manifest } from "./model/manifest.js";
 
-/** rhwp 의 HwpDocument 생성자(주입). exportHwpx 만 구조적으로 요구한다. */
+/** rhwp 의 HwpDocument 생성자(주입). exportHwpx 는 필수, exportHwp(.hwp 네이티브)는 있으면 사용. */
 export interface HwpDocumentCtor {
-  new (bytes: Uint8Array): { exportHwpx(): Uint8Array };
+  new (bytes: Uint8Array): { exportHwpx(): Uint8Array; exportHwp?(): Uint8Array };
 }
 
 export interface DocloomWebDeps {
@@ -54,7 +54,7 @@ export interface DocloomSession {
   /** 편집→원본복원 가능 여부. */
   canRoundtrip: boolean;
   // 내부 상태(직접 건드리지 말 것)
-  _doc?: { exportHwpx(): Uint8Array } | null;
+  _doc?: { exportHwpx(): Uint8Array; exportHwp?(): Uint8Array } | null;
   _manifest?: Manifest | null;
   _bytes?: Uint8Array;
   _name?: string;
@@ -100,7 +100,7 @@ export function createDocloomWeb(deps: DocloomWebDeps = {}) {
     if (isHwp(fmt)) {
       if (!deps.HwpDocument) throw new Error("[docloom-web] hwp/hwpx 는 deps.HwpDocument(rhwp.js) 주입이 필요합니다.");
       await ensureRhwp();
-      const doc = new deps.HwpDocument(bytes) as { exportHwpx(): Uint8Array };
+      const doc = new deps.HwpDocument(bytes) as { exportHwpx(): Uint8Array; exportHwp?(): Uint8Array };
       return {
         fmt,
         preview: hwpToTreePreviewHtml(doc as never, { title: name, rawBytes: bytes }),
@@ -134,12 +134,18 @@ export function createDocloomWeb(deps: DocloomWebDeps = {}) {
     return toPreviewHtml(editedHtml, { title: session._name ?? "" });
   }
 
-  /** 편집된 HTML → 원본 포맷 바이트. hwp 는 .hwpx 로 저장(exportHwp 불안정). */
+  /** 편집된 HTML → 원본 포맷 바이트.
+   *  .hwp 입력은 네이티브 **.hwp** 로 저장(확장자 일치). exportHwp 미지원/실패 시 .hwpx 폴백.
+   *  .hwpx 입력은 .hwpx. (예전엔 exportHwp 가 깨져 무조건 hwpx 였으나 현 rhwp 빌드에서 동작.) */
   function restore(session: DocloomSession, editedHtml: string): { bytes: Uint8Array; ext: string } {
     if (isHwp(session.fmt)) {
       if (!session._doc) throw new Error("[docloom-web] hwp 세션에 문서 인스턴스가 없습니다(open 결과를 그대로 넘기세요).");
       applyHwpEdits(session._doc as never, editedHtml);
-      return { bytes: session._doc.exportHwpx(), ext: "hwpx" };
+      const doc = session._doc as { exportHwpx(): Uint8Array; exportHwp?(): Uint8Array };
+      if (session.fmt === "hwp" && typeof doc.exportHwp === "function") {
+        try { return { bytes: doc.exportHwp(), ext: "hwp" }; } catch { /* 깨지면 .hwpx 폴백 */ }
+      }
+      return { bytes: doc.exportHwpx(), ext: "hwpx" };
     }
     if (!session._manifest) {
       throw new Error(`[docloom-web] '${session.fmt}' 는 편집 복원(왕복)을 지원하지 않습니다(미리보기 전용).`);

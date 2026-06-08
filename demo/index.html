@@ -278,7 +278,7 @@
   import { previewHtml, adapterFor, encode, decode, editablePreviewHtml, formatFromFilename,
            extractPdfModel, pdfModelToPreviewHtml, buildPdfFromModel,
            extendPdfModel, pdfModelPagesHtml, pdfModelTotalPages, pdfModelFontFaceCss,
-           hwpToEditableHtml, applyHwpEdits, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260608cover";
+           hwpToEditableHtml, applyHwpEdits, hwpToSvgPreviewHtml, hwpToTreePreviewHtml } from "./docloom.mjs?v=20260608hwpout";
   // 한글(.hwp/.hwpx) 충실 렌더 — rhwp(Rust+WASM, 소스빌드 vendor/rhwp) 의 절대배치 HTML 렌더.
   import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260602fixes";
 
@@ -542,7 +542,7 @@
     if (!curBytes) return;
     try {
       if (curFmt === "hwp" || curFmt === "hwpx") {
-        // 한글: rhwp 로 표 셀까지 펼친 편집 HTML. (.hwp 도 복원은 .hwpx 로 — exportHwp 불안정)
+        // 한글: rhwp 로 표 셀까지 펼친 편집 HTML. (.hwp 는 네이티브 .hwp 복원, .hwpx 는 .hwpx)
         // curHwpDoc 가 이미 있으면(편집↔미리보기 토글) 재생성하지 않는다 — 이전 편집을 보존.
         await ensureRhwp();
         if (!curHwpDoc) curHwpDoc = new HwpDocument(curBytes);
@@ -583,17 +583,23 @@
   // 복원: 편집된 HTML + manifest → 원본 확장자 바이트 다운로드.
   // 직접편집(docx·csv)이면 iframe 의 #dl-edit, 아니면 편집기 박스에서 읽는다.
   restoreBtn.addEventListener("click", () => {
-    // 한글: rhwp 문서에 편집 반영 → exportHwpx 로 .hwpx 다운로드(.hwp 입력이어도 .hwpx 출력)
+    // 한글: rhwp 문서에 편집 반영 → .hwp 입력은 네이티브 .hwp, .hwpx 입력은 .hwpx 로 다운로드.
+    // (.hwp 는 exportHwp 시도 후 실패 시 .hwpx 폴백.)
     if (curHwpDoc) {
       try {
         const n = applyHwpEdits(curHwpDoc, editor.innerHTML);
-        const out = curHwpDoc.exportHwpx();
+        let out, ext = "hwpx";
+        if (curFmt === "hwp" && typeof curHwpDoc.exportHwp === "function") {
+          try { out = curHwpDoc.exportHwp(); ext = "hwp"; } catch { out = curHwpDoc.exportHwpx(); ext = "hwpx"; }
+        } else {
+          out = curHwpDoc.exportHwpx(); ext = "hwpx";
+        }
         const a = document.createElement("a");
         a.href = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
-        a.download = curName.replace(/\.(hwp|hwpx)$/i, "") + ".hwpx";
+        a.download = curName.replace(/\.(hwp|hwpx)$/i, "") + "." + ext;
         a.click();
         URL.revokeObjectURL(a.href);
-        msg.className = "msg ok"; msg.textContent = `✓ 복원 완료 — ${n}곳 반영, .hwpx 다운로드`;
+        msg.className = "msg ok"; msg.textContent = `✓ 복원 완료 — ${n}곳 반영, .${ext} 다운로드`;
       } catch (e) {
         msg.className = "msg err"; msg.textContent = "✗ 복원 실패: " + (e?.message ?? e);
       }
