@@ -1258,8 +1258,8 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
             if (raw.length > 0 && /^[\s ]+$/.test(raw) && c.bbox && c.bbox.w > 0) {
               return `<span style="display:inline-block;width:${Math.round(c.bbox.w)}px"></span>`;
             }
-            const st = runStyleFor(c, ctx);
-            const style = st ? `${st};white-space:pre-wrap` : "white-space:pre-wrap";
+            // white-space(공백보존·줄바꿈 여부)는 줄 컨테이너(.hp-ln)에서 제어 → span 은 상속.
+            const style = runStyleFor(c, ctx);
             // 텍스트에 합쳐진 선행 공백 → charX 기반 정확폭 스페이서 + 나머지 텍스트
             // (별도 런이 아니라 "33칸+탭+프로젝트…"처럼 텍스트 앞에 붙어 안 잡히던 케이스).
             const lead = c.bbox ? ctx.leadX.get(`${c.bbox.x.toFixed(1)},${c.bbox.y.toFixed(1)}`) : undefined;
@@ -1287,6 +1287,8 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
       const styles: string[] = [];
       const align = lineAlign(node);
       if (align) styles.push(`text-align:${align}`);
+      // 표 셀 안 줄은 좁은 셀에서 넘치지 않게 래핑 허용(.hp-ln 의 nowrap 을 덮음). 본문 줄은 nowrap 유지.
+      if (inCell) styles.push("white-space:pre-wrap");
       // 세로 리듬 보존: 줄을 **다음 줄까지의 간격(pitch)** 만큼 슬롯으로 차지시킨다.
       // ⚠ 글자높이만 쓰면 줄간격이 압축돼, 표지처럼 빈/공백 줄로 아래까지 밀어둔 글(하단 회사명
       //   등)이 중간으로 올라온다. ⚠ "빈 줄"이 사실 공백 런을 담아 html 이 비지 않는 경우도 많으니
@@ -1572,7 +1574,8 @@ export function hwpToTreePreviewHtml(
   .hp-tbl{border-collapse:collapse;table-layout:fixed;margin:8px 0;max-width:100%}
   .hp-tbl td{vertical-align:middle;padding:2px 5px;word-break:break-word;overflow-wrap:anywhere}
   .hp-tbl.hp-nested{margin:3px 0;width:100%}
-  .hp-ln{min-height:1em}
+  /* rhwp TextLine=한 시각 줄 → 래핑 금지(span 사이 줄바꿈 포함). pre=공백보존+nowrap. */
+  .hp-ln{min-height:1em;white-space:pre}
   /* 머리말/꼬리말(쪽번호 등)은 페이지 상/하단 실제 좌표에 고정(흐름과 무관). */
   .hp-hf{position:absolute;z-index:2;white-space:nowrap}
   /* 이미지는 inline-block 으로 — 같은 줄에 들어가면 옆으로, 넘치면 아래로(원본의 가로/세로 배치 근사). */
