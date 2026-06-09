@@ -187,14 +187,68 @@ function buildSfnt(version: number, parts: { tag: string; data: Uint8Array }[]):
   return out;
 }
 
-/** sfnt 의 cmap 테이블을 newCmap 으로 교체(없으면 추가)해 새 폰트 바이트를 만든다. */
+/** head.unitsPerEm + hhea.ascender/descender 읽기(OS/2 합성용). 없으면 기본값. */
+function readMetrics(src: Uint8Array, tables: SfntTable[]): { em: number; asc: number; desc: number } {
+  let em = 1000, asc = 800, desc = -200;
+  const head = tables.find((t) => t.tag === "head");
+  if (head && head.offset + 20 <= src.length) em = u16(src, head.offset + 18) || 1000;
+  const hhea = tables.find((t) => t.tag === "hhea");
+  if (hhea && hhea.offset + 8 <= src.length) {
+    const s16 = (o: number) => { const v = u16(src, o); return v >= 0x8000 ? v - 0x10000 : v; };
+    asc = s16(hhea.offset + 4); desc = s16(hhea.offset + 6);
+  }
+  return { em, asc, desc };
+}
+
+/** 최소 OS/2(v4, 96B). PDF 임베디드 서브셋엔 빠지지만 브라우저(OTS)는 필수로 요구한다. */
+function synthOS2(em: number, asc: number, desc: number): Uint8Array {
+  const b = new Uint8Array(96); const dv = new DataView(b.buffer);
+  const i16 = (o: number, v: number) => dv.setInt16(o, v | 0);
+  const u = (o: number, v: number) => dv.setUint16(o, v & 0xffff);
+  u(0, 4);                       // version 4
+  i16(2, Math.round(em * 0.5));  // xAvgCharWidth
+  u(4, 400);                     // usWeightClass = Regular
+  u(6, 5);                       // usWidthClass = Medium
+  u(8, 0);                       // fsType = installable
+  i16(10, Math.round(em * 0.65)); i16(12, Math.round(em * 0.6)); i16(14, 0); i16(16, Math.round(em * 0.075)); // subscript
+  i16(18, Math.round(em * 0.65)); i16(20, Math.round(em * 0.6)); i16(22, 0); i16(24, Math.round(em * 0.48)); // superscript
+  i16(26, Math.round(em * 0.05)); i16(28, Math.round(em * 0.26)); // strikeout size/pos
+  i16(30, 0);                    // sFamilyClass
+  // panose[10] = 0 (이미 0)
+  // ulUnicodeRange1..4 = 0
+  b.set([0x44, 0x4c, 0x4d, 0x20], 58); // achVendID "DLM "
+  u(62, 0x40);                   // fsSelection = REGULAR
+  u(64, 0x20);                   // usFirstCharIndex
+  u(66, 0xffff);                 // usLastCharIndex
+  i16(68, asc); i16(70, desc); i16(72, 0); // sTypo Ascender/Descender/LineGap
+  u(74, Math.abs(asc)); u(76, Math.abs(desc)); // usWin Ascent/Descent
+  // ulCodePageRange1/2 = 0
+  i16(86, 0); i16(88, Math.round(asc * 0.7)); // sxHeight, sCapHeight
+  u(90, 0); u(92, 0x20); u(94, 0); // usDefaultChar, usBreakChar, usMaxContext
+  return b;
+}
+
+/** 최소 post(v3.0, 32B) — 글리프 이름 없음. OTS 가 요구하는 필수 테이블. */
+function synthPost(): Uint8Array {
+  const b = new Uint8Array(32); const dv = new DataView(b.buffer);
+  dv.setUint32(0, 0x00030000); // version 3.0
+  return b;
+}
+
+/** sfnt 의 cmap 테이블을 newCmap 으로 교체(없으면 추가)해 새 폰트 바이트를 만든다.
+ *  + 브라우저(OTS) 필수인데 PDF 서브셋엔 흔히 빠지는 OS/2·post 를 없으면 합성해 넣는다. */
 function rebuildWithCmap(src: Uint8Array, version: number, tables: SfntTable[], newCmap: Uint8Array): Uint8Array {
   const parts: { tag: string; data: Uint8Array }[] = [];
+  let hasOS2 = false, hasPost = false;
   for (const t of tables) {
     if (t.tag === "cmap") continue;
+    if (t.tag === "OS/2") hasOS2 = true;
+    if (t.tag === "post") hasPost = true;
     parts.push({ tag: t.tag, data: src.subarray(t.offset, t.offset + t.length) });
   }
   parts.push({ tag: "cmap", data: newCmap });
+  if (!hasOS2) { const m = readMetrics(src, tables); parts.push({ tag: "OS/2", data: synthOS2(m.em, m.asc, m.desc) }); }
+  if (!hasPost) parts.push({ tag: "post", data: synthPost() });
   return buildSfnt(version, parts);
 }
 

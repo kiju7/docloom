@@ -79,6 +79,33 @@ const isAscii = (s: string): boolean => {
   return c >= 0x20 && c < 0x7f;
 };
 
+// Helvetica(Base-14) AFM 글리프 폭(/1000 em), 코드 0x20..0x7e. 비임베딩 Helvetica 가 원본
+// 폰트보다 넓게 흘러 표 칸을 넘는 것을 막으려, 런의 자연폭을 이 표로 계산해 원본폭에 맞춰 Tz 압축.
+const HELV_W = [
+  278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
+  556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556,
+  1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778,
+  667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,
+  333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
+  556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
+];
+const helvW = (cp: number): number => (cp >= 0x20 && cp <= 0x7e ? HELV_W[cp - 0x20]! : 556);
+
+/**
+ * 런 텍스트를 출력 폰트(ASCII=Helvetica, 그 외=전각 CID)로 그렸을 때의 자연폭(원본 단위).
+ * 원본 런폭(w)보다 넓으면 그만큼 Tz(가로 100%기준)로 눌러 칸 침범을 막는다. 좁으면 100%.
+ */
+function fitScalePct(text: string, size: number, w?: number): number {
+  if (!w || w <= 0) return 100;
+  let natural = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    natural += (isAscii(ch) ? helvW(cp) / 1000 : 1.0) * size; // 비ASCII 는 전각(1em) 근사
+  }
+  if (natural <= w) return 100;
+  return Math.max(40, (w / natural) * 100); // 추정오차 대비 하한 40%(과압축 방지)
+}
+
 /** PageText[] → PDF 바이트. doc 는 이미지 원본 스트림 디코드에 필요. */
 export function buildPdf(doc: PdfDocument, pages: PageText[]): Uint8Array {
   const out = new PdfOut();
@@ -164,7 +191,12 @@ function buildContent(pt: PageText, imgNames: Map<ImagePlacement, string>): stri
     else {
       const ip = pt.images[ev.i]!;
       const name = imgNames.get(ip);
-      if (name) { const m = ip.ctm; s += `q ${fmt(m[0]!)} ${fmt(m[1]!)} ${fmt(m[2]!)} ${fmt(m[3]!)} ${fmt(m[4]!)} ${fmt(m[5]!)} cm /${name} Do Q\n`; }
+      if (name) {
+        const m = ip.ctm;
+        // 클립(원본보다 큰 표 이미지가 슬라이드 밖으로 새지 않도록) → cm 앞에서 re W n 으로 적용.
+        const cl = ip.clip ? `${fmt(ip.clip[0])} ${fmt(ip.clip[1])} ${fmt(ip.clip[2] - ip.clip[0])} ${fmt(ip.clip[3] - ip.clip[1])} re W n ` : "";
+        s += `q ${cl}${fmt(m[0]!)} ${fmt(m[1]!)} ${fmt(m[2]!)} ${fmt(m[3]!)} ${fmt(m[4]!)} ${fmt(m[5]!)} cm /${name} Do Q\n`;
+      }
     }
   }
   endText();
@@ -172,14 +204,30 @@ function buildContent(pt: PageText, imgNames: Map<ImagePlacement, string>): stri
 
   // ── 텍스트 런: 원점에 Tm, 스크립트(ASCII/CJK) 경계로 폰트 전환하며 흐르게 출력 ──
   function emitRun(it: TextItem): string {
-    let g = `1 0 0 1 ${fmt(it.x)} ${fmt(it.y)} Tm\n`;
+    // 회전/전단 텍스트는 Tm 선형부에 단위 회전행렬을 싣는다(크기는 Tf 가 담당).
+    // it.rot 은 CSS(y-down) 정규화값 → PDF(y-up) 로 되돌리려 b·c 부호를 반전.
+    let g: string;
+    if (it.rot) {
+      const r = it.rot;
+      g = `${fmt(r[0])} ${fmt(-r[1])} ${fmt(-r[2])} ${fmt(r[3])} ${fmt(it.x)} ${fmt(it.y)} Tm\n`;
+    } else {
+      g = `1 0 0 1 ${fmt(it.x)} ${fmt(it.y)} Tm\n`;
+    }
+    // 비임베딩 폰트가 원본보다 넓으면 칸을 침범 → 원본 런폭(it.w)에 맞춰 가로압축(Tz). Tz 는
+    // 텍스트상태라 런마다 명시(미설정 시 직전 런 값 누수). 회전 런은 Tm 이 이미 가로배율을 담아 100.
+    g += `${fmt(it.rot ? 100 : fitScalePct(it.text, it.size, it.w))} Tz\n`;
+    // 글자색: 검정이 아니면 채움색(rg) 명시. 텍스트상태라 검정 런도 0 0 0 으로 재설정해
+    // 직전 런의 색이 새어 나오지 않게 한다.
+    const c = it.color ?? [0, 0, 0];
+    g += `${fmt(c[0] / 255)} ${fmt(c[1] / 255)} ${fmt(c[2] / 255)} rg\n`;
     // 굵기: ASCII 는 Helvetica-Bold(F3), CID 는 렌더모드2 근사.
     for (const seg of splitByScript(it.text)) {
       const ascii = seg.ascii;
       const font = ascii ? (it.bold ? "/F3" : "/F1") : "/F2";
       g += `${font} ${fmt(it.size)} Tf\n`;
       const cidBold = it.bold && !ascii;
-      if (cidBold) g += `2 Tr ${fmt(it.size * 0.03)} w\n`;
+      // CID 볼드는 렌더모드2(채움+선) — 선색도 글자색에 맞춰야 검정 테두리가 안 생긴다.
+      if (cidBold) g += `${fmt(c[0] / 255)} ${fmt(c[1] / 255)} ${fmt(c[2] / 255)} RG\n2 Tr ${fmt(it.size * 0.03)} w\n`;
       if (ascii) g += `(${escLatin(seg.text)}) Tj\n`;
       else g += `<${[...seg.text].map((ch) => hex2(ch.codePointAt(0) ?? 0)).join("")}> Tj\n`;
       if (cidBold) g += "0 Tr\n";
@@ -213,6 +261,12 @@ function emitPath(p: RenderPath): string {
   const rgb = (c: [number, number, number]) => `${fmt(c[0] / 255)} ${fmt(c[1] / 255)} ${fmt(c[2] / 255)}`;
   if (p.fill) s += `${rgb(p.fill)} rg\n`;
   if (p.stroke) s += `${rgb(p.stroke)} RG\n${fmt(Math.max(p.lineWidth, 0.2))} w\n`;
+  // 파선·선끝·선이음 보존(획이 있을 때만 의미).
+  if (p.stroke) {
+    if (p.cap) s += `${p.cap} J\n`;
+    if (p.join) s += `${p.join} j\n`;
+    if (p.dash && p.dash.length) s += `[${p.dash.map((v) => fmt(v)).join(" ")}] ${fmt(p.dashPhase ?? 0)} d\n`;
+  }
   s += d;
   if (p.fill && p.stroke) s += p.evenOdd ? "B*\n" : "B\n";
   else if (p.fill) s += p.evenOdd ? "f*\n" : "f\n";

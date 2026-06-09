@@ -18,8 +18,8 @@
 import type { FormatAdapter } from "../core/format.js";
 import { notImplemented } from "../core/format.js";
 import { toPreviewHtml, type PreviewOptions } from "../preview/preview.js";
-import { PdfDocument, PStream, type PDict, type PdfValue } from "../core/pdf/pdfObjects.js";
-import { extractPageText, type PageText, type ImagePlacement, type RenderPath } from "../core/pdf/pdfText.js";
+import { PdfDocument, PStream, PName, type PDict, type PdfValue } from "../core/pdf/pdfObjects.js";
+import { extractPageText, type PageText, type ImagePlacement, type RenderPath, type ClipRect } from "../core/pdf/pdfText.js";
 import { buildImage, type PdfImage } from "../core/pdf/pdfImages.js";
 import { buildPdf } from "../core/pdf/pdfWriter.js";
 
@@ -74,7 +74,8 @@ function pageGeom(doc: PdfDocument, page: PDict): { x0: number; y0: number; wPt:
  * 좌표계(y 아래쪽)로 환산한 변환행렬을 만든다. img 의 레이아웃 박스는 원본 픽셀크기(W×H)이고
  * transform 이 그걸 장치크기로 매핑하므로, 인접 조각이 같은 좌표계에서 정확히 맞물린다.
  */
-function renderImage(img: PdfImage, ctm: number[], x0: number, y0: number, hPt: number): string {
+function renderImage(img: PdfImage, ctm: number[], x0: number, y0: number, hPt: number, clip?: ClipRect, alpha?: number): string {
+  const op = alpha !== undefined && alpha < 1 ? `;opacity:${alpha.toFixed(3)}` : "";
   const [a, b, c, d, e, f] = ctm;
   const W = img.w, H = img.h;
   const s = PT2PX;
@@ -83,12 +84,22 @@ function renderImage(img: PdfImage, ctm: number[], x0: number, y0: number, hPt: 
   const B = (-s * b!) / W;
   const C = (-s * c!) / H;
   const D = (s * d!) / H;
-  const E = s * (c! + e! - x0);
-  const F = s * (hPt + y0 - d! - f!);
+  let E = s * (c! + e! - x0);
+  let F = s * (hPt + y0 - d! - f!);
   const t = (n: number) => (Number.isFinite(n) ? n.toFixed(4) : "0");
+  // 클립(W)이 있으면 클립 사각형 크기의 overflow:hidden 래퍼로 감싸 칸 밖을 잘라낸다.
+  // 래퍼 안쪽 원점이 (clipLeft, clipTop) 이므로 이미지 평행이동(E,F)을 그만큼 당겨준다.
+  if (clip) {
+    const cl = (clip[0] - x0) * s, cr = (clip[2] - x0) * s;
+    const ct = (hPt - (clip[3] - y0)) * s, cb = (hPt - (clip[1] - y0)) * s;
+    E -= cl; F -= ct;
+    const imgEl = `<img class="pdf-img" src="${img.uri}" width="${W}" height="${H}" alt="" style="transform:matrix(${t(A)},${t(B)},${t(C)},${t(D)},${t(E)},${t(F)})${op}">`;
+    return `<div class="pdf-clip" style="position:absolute;left:${cl.toFixed(2)}px;top:${ct.toFixed(2)}px;` +
+      `width:${(cr - cl).toFixed(2)}px;height:${(cb - ct).toFixed(2)}px;overflow:hidden">${imgEl}</div>`;
+  }
   return (
     `<img class="pdf-img" src="${img.uri}" width="${W}" height="${H}" alt="" ` +
-    `style="transform:matrix(${t(A)},${t(B)},${t(C)},${t(D)},${t(E)},${t(F)})">`
+    `style="transform:matrix(${t(A)},${t(B)},${t(C)},${t(D)},${t(E)},${t(F)})${op}">`
   );
 }
 
@@ -115,6 +126,9 @@ function imageLabel(doc: PdfDocument, st: PStream): string {
   return `🖼 ${esc(name)} ${w}×${h} (미지원)`;
 }
 
+/** clipPath ID 전역 카운터 — 한 문서 내 모든 SVG 에서 유일해야 url(#..) 충돌이 없다. */
+let __clipUid = 0;
+
 /** 벡터 경로들 → 페이지를 덮는 SVG(표 테두리·배경칠·선·도형). */
 function renderVectors(paths: RenderPath[], x0: number, y0: number, wPt: number, hPt: number): string {
   if (paths.length === 0) return "";
@@ -123,13 +137,19 @@ function renderVectors(paths: RenderPath[], x0: number, y0: number, wPt: number,
   const cx = (x: number) => ((x - x0) * s).toFixed(2);
   const cy = (y: number) => ((hPt - (y - y0)) * s).toFixed(2); // PDF y-up → CSS y-down
   const rgb = (c: [number, number, number]) => `rgb(${c[0]},${c[1]},${c[2]})`;
+  const CAP = ["butt", "round", "square"];
+  const JOIN = ["miter", "round", "bevel"];
+  let defs = "";
   let els = "";
   for (const p of paths) {
     let d = "";
+    // 경로 bbox(PDF 좌표) — 클립이 이 bbox 를 완전히 덮으면 클립은 무의미하므로 생략.
+    let pminX = Infinity, pminY = Infinity, pmaxX = -Infinity, pmaxY = -Infinity;
+    const acc = (x: number, y: number) => { if (x < pminX) pminX = x; if (x > pmaxX) pmaxX = x; if (y < pminY) pminY = y; if (y > pmaxY) pmaxY = y; };
     for (const cm of p.cmds) {
-      if (cm.t === "M") d += `M${cx(cm.c[0]!)} ${cy(cm.c[1]!)}`;
-      else if (cm.t === "L") d += `L${cx(cm.c[0]!)} ${cy(cm.c[1]!)}`;
-      else if (cm.t === "C") d += `C${cx(cm.c[0]!)} ${cy(cm.c[1]!)} ${cx(cm.c[2]!)} ${cy(cm.c[3]!)} ${cx(cm.c[4]!)} ${cy(cm.c[5]!)}`;
+      if (cm.t === "M") { d += `M${cx(cm.c[0]!)} ${cy(cm.c[1]!)}`; acc(cm.c[0]!, cm.c[1]!); }
+      else if (cm.t === "L") { d += `L${cx(cm.c[0]!)} ${cy(cm.c[1]!)}`; acc(cm.c[0]!, cm.c[1]!); }
+      else if (cm.t === "C") { d += `C${cx(cm.c[0]!)} ${cy(cm.c[1]!)} ${cx(cm.c[2]!)} ${cy(cm.c[3]!)} ${cx(cm.c[4]!)} ${cy(cm.c[5]!)}`; acc(cm.c[0]!, cm.c[1]!); acc(cm.c[2]!, cm.c[3]!); acc(cm.c[4]!, cm.c[5]!); }
       else d += "Z";
     }
     if (!d) continue;
@@ -137,9 +157,36 @@ function renderVectors(paths: RenderPath[], x0: number, y0: number, wPt: number,
     const stroke = p.stroke ? rgb(p.stroke) : "none";
     const sw = p.stroke ? Math.max(p.lineWidth * s, 0.5).toFixed(2) : "0";
     const fr = p.evenOdd ? ` fill-rule="evenodd"` : "";
-    els += `<path d="${d}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"${fr}/>`;
+    const fo = p.fillAlpha !== undefined && p.fill ? ` fill-opacity="${p.fillAlpha.toFixed(3)}"` : "";
+    const so = p.strokeAlpha !== undefined && p.stroke ? ` stroke-opacity="${p.strokeAlpha.toFixed(3)}"` : "";
+    // 파선(장치단위 → px)·선끝·선이음
+    const dashAttr = p.dash && p.dash.length
+      ? ` stroke-dasharray="${p.dash.map((v) => (v * s).toFixed(2)).join(",")}"${p.dashPhase ? ` stroke-dashoffset="${(p.dashPhase * s).toFixed(2)}"` : ""}`
+      : "";
+    const capAttr = p.cap ? ` stroke-linecap="${CAP[p.cap] ?? "butt"}"` : "";
+    const joinAttr = p.join ? ` stroke-linejoin="${JOIN[p.join] ?? "miter"}"` : "";
+    // 클립: 축정렬 사각형을 clipPath 로 정의해 경로에 건다(칸 밖 칠 잘라냄).
+    // ID 는 전역 유일(__clipUid)해야 한다 — 한 페이지에 SVG 가 여러 개 생기는데 SVG마다 pc0 으로
+    // 재시작하면 url(#pc0) 가 첫 정의로 해석돼 엉뚱하게 잘림(표 셀 배경이 사라지던 버그).
+    // 또 클립이 경로 bbox 를 완전히 덮으면(셀 칠처럼) 무의미하므로 생략한다.
+    let clipAttr = "";
+    if (p.clip) {
+      const eps = 0.5;
+      const covers = p.clip[0] <= pminX + eps && p.clip[1] <= pminY + eps && p.clip[2] >= pmaxX - eps && p.clip[3] >= pmaxY - eps;
+      if (!covers) {
+        const cl = (p.clip[0] - x0) * s, cr = (p.clip[2] - x0) * s;
+        const ct = (hPt - (p.clip[3] - y0)) * s, cb = (hPt - (p.clip[1] - y0)) * s;
+        if (cr - cl > 0.1 && cb - ct > 0.1) {
+          const id = `pc${__clipUid++}`;
+          defs += `<clipPath id="${id}"><rect x="${cl.toFixed(2)}" y="${ct.toFixed(2)}" width="${(cr - cl).toFixed(2)}" height="${(cb - ct).toFixed(2)}"/></clipPath>`;
+          clipAttr = ` clip-path="url(#${id})"`;
+        }
+      }
+    }
+    els += `<path d="${d}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"${fr}${fo}${so}${dashAttr}${capAttr}${joinAttr}${clipAttr}/>`;
   }
-  return `<svg class="pdf-vec" width="${wPx}" height="${hPx}" viewBox="0 0 ${wPx} ${hPx}">${els}</svg>`;
+  const defsEl = defs ? `<defs>${defs}</defs>` : "";
+  return `<svg class="pdf-vec" width="${wPx}" height="${hPx}" viewBox="0 0 ${wPx} ${hPx}">${defsEl}${els}</svg>`;
 }
 
 /** 한 텍스트 글리프 → 절대배치 span(굵기/기울임 반영). editable 면 data-pi/ii + contenteditable. */
@@ -151,13 +198,31 @@ function renderGlyph(it: PageText["items"][number], x0: number, y0: number, hPt:
   const w = it.bold ? "font-weight:700;" : "";
   const st = it.italic ? "font-style:italic;" : "";
   const editAttr = ed ? ` contenteditable="true" data-pi="${ed.pi}" data-ii="${ed.ii}"` : "";
+  // 회전/전단 글자: CSS matrix 로 기울인다. 회전된 칸은 가로폭 흐름맞춤(data-w squeeze)을 적용하지
+  // 않는다(matrix 가 이미 실제 가로배율 a 를 포함 — 둘이 같은 transform 을 다투면 안 됨).
+  const rotated = !!it.rot;
   // 원본 런 폭(px) — 대체폰트가 더 넓게 그려지면 스크립트가 이 폭으로 scaleX 압축(잘림/겹침 방지).
-  const wAttr = it.w && it.w > 0 ? ` data-w="${(it.w * PT2PX).toFixed(1)}"` : "";
+  const wAttr = !rotated && it.w && it.w > 0 ? ` data-w="${(it.w * PT2PX).toFixed(1)}"` : "";
+  // 임베디드 폰트 글자만 폭에 맞춰 "늘리기"까지 허용(원본폭에 근접해 소폭 보정). 비임베디드
+  // 대체폰트는 폭차가 커서 늘리면 가로로 왜곡됨 → 늘리지 않고 좁히기만(표 안 라틴 텍스트 보호).
+  const embAttr = !rotated && it.ff && it.w && it.w > 0 ? ` data-emb="1"` : "";
   // 임베디드 폰트가 있으면 그 family 를 앞세우고, 없는 글리프는 대체 스택으로 폴백.
-  const ff = it.ff ? `font-family:'${it.ff}',-apple-system,"Malgun Gothic",serif;` : "";
+  // 주의: 인라인 style 은 큰따옴표로 감싸므로 폰트명도 작은따옴표로(큰따옴표면 style 속성이
+  // 조기 종료돼 뒤의 color 등이 통째로 무시됨 — 색 안 먹던 버그의 원인).
+  const ff = it.ff ? `font-family:'${it.ff}',-apple-system,'Malgun Gothic',serif;` : "";
+  const op = it.alpha !== undefined && it.alpha < 1 ? `opacity:${it.alpha.toFixed(3)};` : "";
+  // 글자색(추출한 fill/stroke 색). 없으면 CSS 기본(#111). 거의 검정도 그대로 #000 으로 명시.
+  const col = it.color ? `color:rgb(${it.color[0]},${it.color[1]},${it.color[2]});` : "";
+  let rotStyle = "";
+  if (it.rot) {
+    const r = it.rot;
+    const f4 = (n: number) => (Number.isFinite(n) ? n.toFixed(5) : "0");
+    // 회전축은 글자 원점(좌측·베이스라인). 베이스라인은 span 상단에서 sizePx*0.82 아래.
+    rotStyle = `transform-origin:0 ${(sizePx * 0.82).toFixed(2)}px;transform:matrix(${f4(r[0])},${f4(r[1])},${f4(r[2])},${f4(r[3])},0,0);`;
+  }
   return (
-    `<span class="pdf-t${ed ? " pdf-edit" : ""}"${editAttr}${wAttr} style="left:${left.toFixed(2)}px;top:${top.toFixed(2)}px;` +
-    `font-size:${sizePx.toFixed(2)}px;${ff}${w}${st}">${esc(it.text)}</span>`
+    `<span class="pdf-t${ed ? " pdf-edit" : ""}"${editAttr}${wAttr}${embAttr} style="left:${left.toFixed(2)}px;top:${top.toFixed(2)}px;` +
+    `font-size:${sizePx.toFixed(2)}px;${ff}${w}${st}${col}${op}${rotStyle}">${esc(it.text)}</span>`
   );
 }
 
@@ -199,7 +264,7 @@ function renderPage(
     const ip = pt.images[ev.i]! as ImagePlacement;
     let img = imgCache.get(ip.stream);
     if (img === undefined) { try { img = buildImage(doc, ip.stream, ip.fill); } catch { img = null; } imgCache.set(ip.stream, img); }
-    if (img) { out += renderImage(img, ip.ctm, x0, y0, pt.hPt); imgCount++; }
+    if (img) { out += renderImage(img, ip.ctm, x0, y0, pt.hPt, ip.clip, ip.alpha); imgCount++; }
     else {
       const box = placeholderBox(ip.ctm, x0, y0, pt.hPt);
       if (box.w >= 24 && box.h >= 24) {
@@ -229,12 +294,66 @@ function renderPage(
  */
 const DEFAULT_MAX_PAGES = 20;
 
+/**
+ * 페이지 /Annots 중 외관 스트림(/AP /N)을 가진 주석 → {Form XObject, ctm}.
+ * ctm 은 외관 BBox(Matrix 적용 후)를 주석 Rect 로 보내는 사상(PDF 12.5.5). 숨김/뷰숨김·
+ * Popup·외관없는 Link 는 건너뛴다. 결과는 페이지 콘텐츠 위층에 그려진다.
+ */
+function annotAppearances(doc: PdfDocument, page: PDict): { stream: PStream; ctm: number[]; resources?: PDict }[] {
+  const out: { stream: PStream; ctm: number[]; resources?: PDict }[] = [];
+  const annots = doc.resolve(doc.get(page, "Annots"));
+  if (!Array.isArray(annots)) return out;
+  const n = (v: PdfValue) => doc.numOf(v, 0);
+  for (const aRef of annots.slice(0, 2000)) {
+    const an = doc.getDict(aRef);
+    if (!an) continue;
+    const flags = doc.numOf(doc.get(an, "F"), 0);
+    if (flags & 0x2 || flags & 0x20) continue; // Hidden(bit2) / NoView(bit6)
+    const ap = doc.getDict(doc.get(an, "AP"));
+    if (!ap) continue;
+    let nAp = doc.resolve(doc.get(ap, "N"));
+    // /N 이 외관상태별 하위딕셔너리면 /AS 로 고른다(체크박스 On/Off 등).
+    if (nAp && !(nAp instanceof PStream)) {
+      const asName = doc.get(an, "AS");
+      const sub = doc.getDict(nAp);
+      const key = asName instanceof PName ? asName.name : sub ? Object.keys(sub)[0] : undefined;
+      nAp = key ? doc.resolve(doc.get(sub, key)) : null;
+    }
+    if (!(nAp instanceof PStream)) continue;
+    const rect = doc.resolve(doc.get(an, "Rect"));
+    if (!Array.isArray(rect) || rect.length !== 4) continue;
+    const rx0 = Math.min(n(rect[0]!), n(rect[2]!)), rx1 = Math.max(n(rect[0]!), n(rect[2]!));
+    const ry0 = Math.min(n(rect[1]!), n(rect[3]!)), ry1 = Math.max(n(rect[1]!), n(rect[3]!));
+    const bboxA = doc.resolve(doc.get(nAp.dict, "BBox"));
+    if (!Array.isArray(bboxA) || bboxA.length !== 4) continue;
+    const mtxA = doc.resolve(doc.get(nAp.dict, "Matrix"));
+    const M: number[] = Array.isArray(mtxA) && mtxA.length === 6 ? mtxA.map((v) => n(v)) : [1, 0, 0, 1, 0, 0];
+    // BBox 네 모서리를 Matrix 로 변환 → 변환된 경계상자.
+    const bx = [n(bboxA[0]!), n(bboxA[2]!)], by = [n(bboxA[1]!), n(bboxA[3]!)];
+    const xs: number[] = [], ys: number[] = [];
+    for (const X of bx) for (const Y of by) { xs.push(M[0]! * X + M[2]! * Y + M[4]!); ys.push(M[1]! * X + M[3]! * Y + M[5]!); }
+    const tx0 = Math.min(...xs), tx1 = Math.max(...xs), ty0 = Math.min(...ys), ty1 = Math.max(...ys);
+    const sx = tx1 - tx0 > 1e-6 ? (rx1 - rx0) / (tx1 - tx0) : 1;
+    const sy = ty1 - ty0 > 1e-6 ? (ry1 - ry0) / (ty1 - ty0) : 1;
+    // A: 변환된 BBox → Rect (스케일+평행이동). 최종 ctm = M 먼저, 그다음 A.
+    const A = [sx, 0, 0, sy, rx0 - sx * tx0, ry0 - sy * ty0];
+    const ctm = [
+      M[0]! * A[0]! + M[1]! * A[2]!, M[0]! * A[1]! + M[1]! * A[3]!,
+      M[2]! * A[0]! + M[3]! * A[2]!, M[2]! * A[1]! + M[3]! * A[3]!,
+      M[4]! * A[0]! + M[5]! * A[2]! + A[4]!, M[4]! * A[1]! + M[5]! * A[3]! + A[5]!,
+    ];
+    out.push({ stream: nAp, ctm, resources: doc.getDict(doc.get(nAp.dict, "Resources")) });
+  }
+  return out;
+}
+
 /** 한 페이지 → PageText. 추출 실패해도 기하만 채운 빈 페이지를 돌려 렌더가 안 끊기게. */
 function extractOnePage(doc: PdfDocument, page: PDict): PageText {
   const g = pageGeom(doc, page);
   const resources = doc.getDict(doc.get(page, "Resources"));
   try {
-    return extractPageText(doc, pageContent(doc, page), resources, { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0 });
+    const annots = (() => { try { return annotAppearances(doc, page); } catch { return []; } })();
+    return extractPageText(doc, pageContent(doc, page), resources, { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0 }, annots);
   } catch {
     return { wPt: g.wPt, hPt: g.hPt, rotate: g.rotate, x0: g.x0, y0: g.y0, items: [], images: [], paths: [] };
   }
@@ -344,14 +463,22 @@ export function pdfModelFontFaceCss(model: PdfEditModel): string {
  */
 const PDF_FIT_SCRIPT = `<script>
 (function(){
-  // 대체폰트가 원본보다 넓게 그려진 줄을 원본 폭(data-w)으로 scaleX 압축 → 페이지 밖 잘림 방지.
+  // 각 글자조각을 원본 폭(data-w)에 scaleX 로 정확히 맞춘다(좁히기+늘리기).
+  //   · 넓게 그려진 줄 → 압축(페이지 밖 잘림 방지)
+  //   · 좁게 그려진 조각 → 확장(다음 조각이 절대좌표로 고정돼 있어, 안 늘리면 조각 사이 틈이 벌어짐.
+  //     원본이 한 줄에서 폰트를 번갈아 써 글자단위로 쪼개진 경우 특히 띄어쓰기가 과하게 보이는 문제 해결)
+  // 과도한 가로왜곡은 막으려 배율을 [0.4, 1.5] 로 제한(극단 조각은 작은 틈을 감수).
   function squeeze(root){
     var ts=(root||document).querySelectorAll('.pdf-t[data-w]');
     for(var i=0;i<ts.length;i++){
       var el=ts[i], target=parseFloat(el.getAttribute('data-w')); if(!(target>0)) continue;
       el.style.transform='none';            // 먼저 초기화하고 자연폭 측정(재호출에도 안정적)
-      var natural=el.scrollWidth;
-      el.style.transform = natural>target+0.5 ? 'scaleX('+(target/natural)+')' : '';
+      var natural=el.scrollWidth; if(!(natural>0)) continue;
+      var s=target/natural;
+      // 늘리기는 임베디드 폰트(data-emb)만 — 대체폰트를 늘리면 가로왜곡(표 안 라틴 텍스트).
+      if(s>1 && !el.hasAttribute('data-emb')) s=1;
+      if(s<0.4) s=0.4; else if(s>1.5) s=1.5;
+      el.style.transform = (s>0.999 && s<1.001) ? '' : 'scaleX('+s+')';
     }
   }
   function fit(root){

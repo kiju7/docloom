@@ -41,8 +41,17 @@ export interface TextItem {
   seq: number;
   /** 런의 원본 가로 폭(PDF 단위). 대체폰트가 더 넓게 그려질 때 이 폭으로 압축(scaleX)해 잘림 방지. */
   w?: number;
+  /** 이 글리프의 장치공간 가로 전진폭(PDF 단위). 런 결합 때 위치상(문자 없는) 공백 판정에 사용. */
+  adv?: number;
   /** 임베디드 폰트 @font-face family(있으면). 런 결합은 같은 ff 끼리만. */
   ff?: string;
+  /** 글자 채움색(RGB 0..255). 기본 검정([0,0,0])이면 생략 가능. 런 결합은 같은 색끼리만. */
+  color?: [number, number, number];
+  /** 글자 불투명도(0..1, ExtGState ca). 생략=1. */
+  alpha?: number;
+  /** 회전/전단 텍스트의 단위 선형부 [a,b,c,d](크기 size 로 정규화, CSS y-down 기준).
+   *  생략=수평(직립). 있으면 렌더가 CSS matrix 로 기울이고 data-w 압축은 건너뛴다. */
+  rot?: [number, number, number, number];
 }
 export interface PageText {
   wPt: number;
@@ -227,11 +236,26 @@ function codesOf(bytes: Uint8Array, twoByte: boolean): number[] {
   return codes;
 }
 
+// Wingdings/Symbol 등 심볼폰트의 사유영역(PUA, U+F0xx) 글머리표 → 유니코드 글리프.
+// 임베디드 서브셋이 PUA 를 못 그려 ☐(tofu)로 나오므로, 대체폰트가 그릴 수 있는 실제 글자로 치환.
+const SYMBOL_PUA: Record<number, string> = {
+  0xf0b7: "•", 0xf0a7: "▪", 0xf06e: "■", 0xf06c: "●", 0xf071: "◆", 0xf075: "◆",
+  0xf0a8: "▪", 0xf0d8: "➢", 0xf0fc: "✔", 0xf0fb: "✘", 0xf0ad: "□", 0xf09f: "•",
+};
+/** 디코드 결과의 단일 PUA 심볼문자를 알려진 유니코드로 치환(아니면 그대로). */
+function remapSymbol(s: string): string {
+  if (s.length === 1) {
+    const cp = s.codePointAt(0)!;
+    if (cp >= 0xf000 && cp <= 0xf0ff && SYMBOL_PUA[cp]) return SYMBOL_PUA[cp]!;
+  }
+  return s;
+}
+
 /** 코드 → 표시 문자열(ToUnicode 우선 → UCS2 인코딩이면 코드=유니코드 → 단순폰트 폴백). */
 function codeToText(font: FontModel, code: number): string {
   if (font.toUnicode) {
     const s = font.toUnicode.get(code);
-    if (s !== undefined) return s;
+    if (s !== undefined) return remapSymbol(s);
   }
   // UniKS-UCS2-H 등: 2바이트 코드가 곧 유니코드(ToUnicode 불필요).
   if (font.unicodeCodes) return code > 0 ? String.fromCharCode(code) : "";
@@ -247,14 +271,20 @@ const CONTENT_OPS = new Set([
   "RG", "G", "K", "SC", "SCN", "w", // 획(선) 색·선폭
   "m", "l", "c", "v", "y", "re", "h", // 경로 구성
   "S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n", "W", "W*", // 경로 칠/선/클립
+  "gs", "d", "J", "j", // 그래픽상태(투명도 등)·파선·선끝·선이음
 ]);
 
 /** 페이지에 배치된 이미지 XObject: 원본 스트림 + 배치 행렬(CTM) + 채움색(ImageMask 용). */
+/** 클립 사각형(장치좌표, PDF y-up): [x0, y0, x1, y1]. 슬라이드 밖으로 넘치는 표·이미지를 잘라낸다. */
+export type ClipRect = [number, number, number, number];
+
 export interface ImagePlacement {
   stream: PStream;
   ctm: number[]; // [a b c d e f]
   fill: [number, number, number];
   seq: number;
+  clip?: ClipRect; // 그릴 때 활성 클립(W) — 원본보다 큰 이미지가 칸 밖으로 새는 것 방지
+  alpha?: number; // 이미지 불투명도(0..1, ExtGState ca). 생략=1
 }
 
 /** 벡터 경로 명령(장치좌표, PDF y-up). M/L=점1, C=제어2+끝점, Z=닫기. */
@@ -270,6 +300,17 @@ export interface RenderPath {
   lineWidth: number; // 장치 단위(px 변환 전, PDF point)
   evenOdd: boolean;
   seq: number;
+  /** 칠/선 불투명도(0..1). ExtGState ca/CA 에서. 생략=1(불투명). */
+  fillAlpha?: number;
+  strokeAlpha?: number;
+  /** 파선 패턴(장치단위 길이 배열)+위상. 빈/생략=실선. */
+  dash?: number[];
+  dashPhase?: number;
+  /** 선끝 0=butt 1=round 2=square, 선이음 0=miter 1=round 2=bevel. */
+  cap?: number;
+  join?: number;
+  /** 그릴 때 활성 클립(장치좌표). 칸 밖으로 새는 칠을 잘라낸다. */
+  clip?: ClipRect;
 }
 
 /** Form XObject 재귀 한도(폭주/순환 방지). */
@@ -287,6 +328,8 @@ export function extractPageText(
   content: Uint8Array,
   resources: PDict | undefined,
   geom: { wPt: number; hPt: number; rotate: number; x0?: number; y0?: number },
+  /** 주석 외관(/AP /N) Form XObject 들 — 페이지 콘텐츠 뒤(위층)에 그 ctm 으로 그린다. */
+  annots?: { stream: PStream; ctm: number[]; resources?: PDict }[],
 ): PageText {
   const items: TextItem[] = [];
   const images: ImagePlacement[] = [];
@@ -295,7 +338,7 @@ export function extractPageText(
   let seq = 0; // 전역 그리기 순서(이미지·벡터·텍스트 공통, 재귀 form 포함)
 
   // 한 콘텐츠 스트림을 주어진 기준 CTM·리소스로 실행(Form XObject 는 재귀).
-  const run = (stream: Uint8Array, res: PDict | undefined, baseCtm: Mat, depth: number): void => {
+  const run = (stream: Uint8Array, res: PDict | undefined, baseCtm: Mat, depth: number, baseClip?: ClipRect): void => {
     const fontCache = new Map<string, FontModel>();
     const fontsDict = doc.getDict(doc.get(res, "Font"));
     const getFont = (name: string): FontModel | undefined => {
@@ -308,7 +351,16 @@ export function extractPageText(
     };
 
     let ctm: Mat = baseCtm;
-    const gsStack: { ctm: Mat; fill: [number, number, number]; stroke: [number, number, number]; lineWidth: number }[] = [];
+    let clip: ClipRect | undefined = baseClip; // 현재 클립 사각형(장치좌표). undefined = 페이지 전체. Form 은 바깥 클립 상속.
+    let pendingClip: ClipRect | undefined; // W 로 지정됐고 다음 페인트 op 에서 활성화될 클립.
+    // 텍스트상태(Tr·자간·글꼴 등)도 PDF 명세상 그래픽상태라 q/Q 로 저장·복원해야 한다
+    // (안 하면 q 3 Tr (OCR) Tj Q 뒤에도 Tr 3 이 눌러붙어 진짜 텍스트가 숨거나 OCR 이 샌다).
+    type GS = {
+      ctm: Mat; fill: [number, number, number]; stroke: [number, number, number]; lineWidth: number; clip?: ClipRect;
+      fillAlpha: number; strokeAlpha: number; dash: number[]; dashPhase: number; cap: number; join: number;
+      charSpace: number; wordSpace: number; hScale: number; leading: number; rise: number; renderMode: number; font: FontModel | undefined; fontSize: number;
+    };
+    const gsStack: GS[] = [];
     let tm: Mat = IDENT;
     let tlm: Mat = IDENT;
     let font: FontModel | undefined;
@@ -322,12 +374,20 @@ export function extractPageText(
     let fill: [number, number, number] = [0, 0, 0];
     let stroke: [number, number, number] = [0, 0, 0];
     let lineWidth = 1;
+    let fillAlpha = 1; // ExtGState ca (채움 불투명도)
+    let strokeAlpha = 1; // ExtGState CA (선 불투명도)
+    let dash: number[] = []; // 파선 패턴(user 단위) — 비면 실선
+    let dashPhase = 0;
+    let cap = 0; // 선끝
+    let join = 0; // 선이음
 
     // 경로(벡터) 상태 — 점은 USER 공간에서 추적, 명령에 담을 땐 CTM 으로 장치공간 변환.
     let cmds: PathCmd[] = [];
     let cpx = 0, cpy = 0; // 현재점(user)
     let spx = 0, spy = 0; // 서브패스 시작점(user) — h 용
     const tpt = (x: number, y: number): [number, number] => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]];
+    // 경로 페인트(또는 n) 시점에 W 로 예약된 클립을 활성화한다(PDF: 클립은 페인트 op 뒤 적용).
+    const flushClip = (): void => { if (pendingClip) { clip = clipIntersect(clip, pendingClip); pendingClip = undefined; } };
     const paint = (doFill: boolean, doStroke: boolean, evenOdd: boolean): void => {
       if (cmds.length && paths.length < MAX_PATHS && (doFill || doStroke)) {
         // 선폭을 장치 단위로 근사(CTM 면적 제곱근).
@@ -339,12 +399,42 @@ export function extractPageText(
           lineWidth: Math.max(lineWidth * scale, 0),
           evenOdd,
           seq: seq++,
+          fillAlpha: doFill && fillAlpha < 1 ? fillAlpha : undefined,
+          strokeAlpha: doStroke && strokeAlpha < 1 ? strokeAlpha : undefined,
+          dash: dash.length ? dash.map((v) => v * scale) : undefined, // 장치단위로 환산
+          dashPhase: dash.length ? dashPhase * scale : undefined,
+          cap: cap || undefined,
+          join: join || undefined,
+          clip,
         });
       }
       cmds = [];
+      flushClip();
     };
 
     const setLine = (m: Mat): void => { tlm = m; tm = m; };
+
+    // ExtGState(/gs) — 투명도(ca/CA)·선폭(LW)·파선(D) 등 그래픽상태 묶음 적용.
+    const applyGs = (name: string): void => {
+      const egDict = doc.getDict(doc.get(res, "ExtGState"));
+      const gsd = doc.getDict(doc.get(egDict, name));
+      if (!gsd) return;
+      const ca = doc.get(gsd, "ca");
+      if (typeof ca === "number") fillAlpha = Math.max(0, Math.min(1, ca));
+      const CA = doc.get(gsd, "CA");
+      if (typeof CA === "number") strokeAlpha = Math.max(0, Math.min(1, CA));
+      const lw = doc.get(gsd, "LW");
+      if (typeof lw === "number") lineWidth = lw;
+      const lc = doc.get(gsd, "LC");
+      if (typeof lc === "number") cap = lc;
+      const lj = doc.get(gsd, "LJ");
+      if (typeof lj === "number") join = lj;
+      const D = doc.resolve(doc.get(gsd, "D")); // [ [dashArray] phase ]
+      if (Array.isArray(D) && D.length === 2) {
+        const arr = doc.resolve(D[0]!);
+        if (Array.isArray(arr)) { dash = arr.map((v) => doc.numOf(v, 0)).filter((v) => v >= 0); dashPhase = doc.numOf(D[1]!, 0); }
+      }
+    };
 
     // 글리프마다 자기 좌표에 개별 배치한다(묶음 단위로 흘리면 폰트 폭 차이로 겹침/표 어긋남).
     const show = (bytes: Uint8Array): void => {
@@ -353,17 +443,32 @@ export function extractPageText(
       const codes = codesOf(bytes, font.twoByte);
       for (const code of codes) {
         const ch = codeToText(font, code);
+        // 이 글리프의 다음 tm(전진폭 측정용) — 폭+자간+(공백이면)단어간격을 미리 계산.
+        const w0 = (font.widths.get(code) ?? font.defaultWidth) / 1000;
+        const isSpace = !font.twoByte && code === 0x20;
+        const tx = (w0 * fontSize + charSpace + (isSpace ? wordSpace : 0)) * hScale;
+        const ntm = mul([1, 0, 0, 1, tx, 0], tm);
         // 공백도 보존(런 결합 때 단어 사이 띄어쓰기로 쓰임). 빈 문자열만 건너뜀.
         if (!invisible && ch !== "" && items.length < MAX_ITEMS) {
           const textState: Mat = [fontSize * hScale, 0, 0, fontSize, 0, rise];
           const trm = mul(textState, mul(tm, ctm));
-          const size = Math.abs(trm[3]) || Math.abs(fontSize);
-          items.push({ x: trm[4], y: trm[5], size, text: ch, bold: font.bold, italic: font.italic, seq: seq++, ff: font.embedFamily });
+          // 세로 크기는 y축 이미지 길이(회전해도 안정). 직립이면 |trm[3]| 와 같다.
+          const size = Math.hypot(trm[2], trm[3]) || Math.abs(fontSize);
+          // 장치공간 가로 전진폭 = tm 전진 전/후의 trm[4] 차이.
+          const adv = mul(textState, mul(ntm, ctm))[4] - trm[4];
+          // 렌더모드 1·5(획만)는 stroke 색, 그 외는 fill 색이 글자색.
+          const col: [number, number, number] = renderMode === 1 || renderMode === 5 ? stroke : fill;
+          const al = renderMode === 1 || renderMode === 5 ? strokeAlpha : fillAlpha;
+          // 회전/전단 판정: trm 의 비대각 성분이 유의미하면 CSS matrix 로 기울인다(직립은 생략).
+          const A = trm[0], B = trm[1], C = trm[2], D = trm[3];
+          const sheared = Math.abs(B) > 1e-3 * (Math.abs(A) || 1) || Math.abs(C) > 1e-3 * (Math.abs(D) || 1);
+          // CSS(y-down) 단위 선형부: local(1,0)→(A,-B)/size, local(0,1)→(-C,D)/size. 직립이면 [h,0,0,1].
+          const rot: [number, number, number, number] | undefined = sheared && size > 0
+            ? [A / size, -B / size, -C / size, D / size]
+            : undefined;
+          items.push({ x: trm[4], y: trm[5], size, text: ch, bold: font.bold, italic: font.italic, seq: seq++, ff: font.embedFamily, adv, color: [...col], alpha: al < 1 ? al : undefined, rot });
         }
-        const w0 = (font.widths.get(code) ?? font.defaultWidth) / 1000;
-        const isSpace = !font.twoByte && code === 0x20;
-        const tx = (w0 * fontSize + charSpace + (isSpace ? wordSpace : 0)) * hScale;
-        tm = mul([1, 0, 0, 1, tx, 0], tm);
+        tm = ntm;
       }
     };
 
@@ -386,14 +491,14 @@ export function extractPageText(
       const sub = doc.get(xo.dict, "Subtype");
       const subName = sub instanceof PName ? sub.name : "";
       if (subName === "Image") {
-        images.push({ stream: xo, ctm: ctm.slice(), fill, seq: seq++ });
+        images.push({ stream: xo, ctm: ctm.slice(), fill, seq: seq++, clip, alpha: fillAlpha < 1 ? fillAlpha : undefined });
       } else if (subName === "Form" && depth < MAX_FORM_DEPTH) {
         const mtxArr = doc.resolve(doc.get(xo.dict, "Matrix"));
         let fm: Mat = IDENT;
         if (Array.isArray(mtxArr) && mtxArr.length === 6)
           fm = mtxArr.map((v) => doc.numOf(v, 0)) as unknown as Mat;
         const formRes = doc.getDict(doc.get(xo.dict, "Resources")) ?? res;
-        run(doc.decodeStream(xo), formRes, mul(fm, ctm), depth + 1);
+        run(doc.decodeStream(xo), formRes, mul(fm, ctm), depth + 1, clip);
       }
     };
 
@@ -408,8 +513,8 @@ export function extractPageText(
         const a = stack;
         const num = (i: number): number => (typeof a[i] === "number" ? (a[i] as number) : 0);
         switch (op) {
-          case "q": gsStack.push({ ctm, fill: [...fill], stroke: [...stroke], lineWidth }); break;
-          case "Q": { const s = gsStack.pop(); if (s) { ctm = s.ctm; fill = s.fill; stroke = s.stroke; lineWidth = s.lineWidth; } break; }
+          case "q": gsStack.push({ ctm, fill: [...fill], stroke: [...stroke], lineWidth, clip, fillAlpha, strokeAlpha, dash: [...dash], dashPhase, cap, join, charSpace, wordSpace, hScale, leading, rise, renderMode, font, fontSize }); break;
+          case "Q": { const s = gsStack.pop(); if (s) { ctm = s.ctm; fill = s.fill; stroke = s.stroke; lineWidth = s.lineWidth; clip = s.clip; fillAlpha = s.fillAlpha; strokeAlpha = s.strokeAlpha; dash = s.dash; dashPhase = s.dashPhase; cap = s.cap; join = s.join; charSpace = s.charSpace; wordSpace = s.wordSpace; hScale = s.hScale; leading = s.leading; rise = s.rise; renderMode = s.renderMode; font = s.font; fontSize = s.fontSize; } break; }
           case "cm": ctm = mul([num(0), num(1), num(2), num(3), num(4), num(5)], ctm); break;
           case "BT": setLine(IDENT); break;
           case "ET": break;
@@ -442,19 +547,30 @@ export function extractPageText(
           case "rg": fill = [clampByte(num(0)), clampByte(num(1)), clampByte(num(2))]; break;
           case "g": { const v = clampByte(num(0)); fill = [v, v, v]; break; }
           case "k": fill = cmyk(num(0), num(1), num(2), num(3)); break;
-          case "sc": case "scn":
-            if (a.length >= 3) fill = [clampByte(num(0)), clampByte(num(1)), clampByte(num(2))];
-            else if (a.length === 1) { const v = clampByte(num(0)); fill = [v, v, v]; }
+          case "sc": case "scn": {
+            // scn 의 마지막 피연산자가 패턴명(PName)이면 색 성분이 아님 → 색 갱신 안 함(검정화 방지).
+            const numComps = a.filter((v) => typeof v === "number").length;
+            if (numComps >= 4) fill = cmyk(num(0), num(1), num(2), num(3));
+            else if (numComps >= 3) fill = [clampByte(num(0)), clampByte(num(1)), clampByte(num(2))];
+            else if (numComps === 1) { const v = clampByte(num(0)); fill = [v, v, v]; }
             break;
+          }
           // 획(선) 색 + 선폭
           case "RG": stroke = [clampByte(num(0)), clampByte(num(1)), clampByte(num(2))]; break;
           case "G": { const v = clampByte(num(0)); stroke = [v, v, v]; break; }
           case "K": stroke = cmyk(num(0), num(1), num(2), num(3)); break;
-          case "SC": case "SCN":
-            if (a.length >= 3) stroke = [clampByte(num(0)), clampByte(num(1)), clampByte(num(2))];
-            else if (a.length === 1) { const v = clampByte(num(0)); stroke = [v, v, v]; }
+          case "SC": case "SCN": {
+            const numComps = a.filter((v) => typeof v === "number").length;
+            if (numComps >= 4) stroke = cmyk(num(0), num(1), num(2), num(3));
+            else if (numComps >= 3) stroke = [clampByte(num(0)), clampByte(num(1)), clampByte(num(2))];
+            else if (numComps === 1) { const v = clampByte(num(0)); stroke = [v, v, v]; }
             break;
+          }
           case "w": lineWidth = num(0); break;
+          case "gs": if (a[0] instanceof PName) applyGs((a[0] as PName).name); break;
+          case "d": { const arr = a[0]; dash = Array.isArray(arr) ? arr.map((v) => (typeof v === "number" ? v : 0)).filter((v) => v >= 0) : []; dashPhase = num(1); break; }
+          case "J": cap = num(0); break;
+          case "j": join = num(0); break;
           // ── 경로 구성(USER 좌표 → tpt 로 장치좌표 변환) ──
           case "m": cpx = num(0); cpy = num(1); spx = cpx; spy = cpy; cmds.push({ t: "M", c: tpt(cpx, cpy) }); break;
           case "l": cpx = num(0); cpy = num(1); cmds.push({ t: "L", c: tpt(cpx, cpy) }); break;
@@ -483,8 +599,8 @@ export function extractPageText(
           case "f*": paint(true, false, true); break;
           case "B": case "b": if (op === "b") cmds.push({ t: "Z", c: [] }); paint(true, true, false); break;
           case "B*": case "b*": if (op === "b*") cmds.push({ t: "Z", c: [] }); paint(true, true, true); break;
-          case "n": cmds = []; break; // 칠 없음(클립 종료) → 경로 폐기
-          case "W": case "W*": break; // 클립 영역 설정 — 무시(다음 페인트 op 가 경로 처리)
+          case "n": cmds = []; flushClip(); break; // 칠 없음 → 경로 폐기, 예약된 클립 활성화
+          case "W": case "W*": pendingClip = clipIntersect(clip, pathBBox(cmds)); break; // 현재 경로의 경계상자를 다음 페인트 때 클립으로
           case "Do": if (a[0] instanceof PName) doXObject((a[0] as PName).name); break;
         }
         stack = [];
@@ -496,6 +612,10 @@ export function extractPageText(
   };
 
   run(content, resources, IDENT, 0);
+  // 주석 외관: 페이지 콘텐츠 위(나중 seq)에 각자의 ctm 으로 그린다(폼필드·도장·텍스트노트 등).
+  for (const an of annots ?? []) {
+    try { run(doc.decodeStream(an.stream), an.resources ?? resources, an.ctm as Mat, 1, undefined); } catch { /* 한 주석 실패는 무시 */ }
+  }
   return { wPt: geom.wPt, hPt: geom.hPt, rotate: geom.rotate, x0: geom.x0 ?? 0, y0: geom.y0 ?? 0, items: coalesceRuns(items), images, paths };
 }
 
@@ -507,22 +627,33 @@ export function extractPageText(
 function coalesceRuns(items: TextItem[]): TextItem[] {
   const out: TextItem[] = [];
   let cur: TextItem | null = null;
-  let curEnd = 0; // 현재 런의 추정 오른쪽 끝(x)
+  let curEnd = 0; // 현재 런의 추정 오른쪽 끝(x) — estW 기반, 병합 거리 판정용
+  let prevAdvEnd = 0; // 직전 글리프의 정밀 끝(x + adv) — 위치상 공백 간격 판정용
   const estW = (it: TextItem): number => {
     const cp = it.text.codePointAt(0) ?? 0;
     return it.size * (cp > 0x2e80 ? 1.0 : 0.5); // CJK 는 전각, 그 외 반각 근사
   };
+  // 직전 글리프 끝부터 현재 글리프까지 간격이 단어 공백만큼 벌어졌는데 실제 공백 문자가
+  // 없으면(TJ 음수보정·Td/Tm 재배치) 공백 1개를 끼워 넣어 단어가 붙는 것을 막는다.
+  const advEnd = (it: TextItem): number => it.x + (it.adv ?? estW(it));
   for (const it of items) {
+    const gap = cur ? it.x - prevAdvEnd : 0; // 직전 글리프 끝→현재 글리프 정밀 간격
     const merge =
       cur !== null &&
       Math.abs(it.y - cur.y) < cur.size * 0.45 && // 같은 줄
       it.size > cur.size * 0.8 && it.size < cur.size * 1.25 && // 같은 크기
       it.bold === cur.bold && it.italic === cur.italic && // 같은 굵기/기울임
       it.ff === cur.ff && // 같은 폰트(임베디드 family)
+      sameColor(it.color, cur.color) && // 같은 글자색
+      it.alpha === cur.alpha && // 같은 불투명도
+      sameRot(it.rot, cur.rot) && // 같은 회전/전단(직립끼리·동일행렬끼리만)
       it.x >= curEnd - cur.size * 0.5 && // 역방향 큰 점프 아님
-      it.x <= curEnd + cur.size * 1.3; // 열 경계만큼 멀지 않음
+      gap <= cur.size * 0.5; // 열 경계(0.5em 초과 양수 간격)는 끊어 절대위치 보존(표 칸 침범 방지)
     if (merge && cur) {
-      cur.text += it.text;
+      const needSpace =
+        gap > cur.size * 0.25 && // 단어 공백(~0.25em) 만큼 벌어짐
+        !/\s$/.test(cur.text) && !/^\s/.test(it.text); // 이미 공백이면 중복 안 함
+      cur.text += (needSpace ? " " : "") + it.text;
       curEnd = it.x + estW(it);
       cur.w = curEnd - cur.x; // 런이 늘어날 때마다 원본 오른쪽 끝까지의 폭 갱신
     } else {
@@ -531,9 +662,41 @@ function coalesceRuns(items: TextItem[]): TextItem[] {
       curEnd = it.x + estW(it);
       cur.w = curEnd - cur.x;
     }
+    prevAdvEnd = advEnd(it);
   }
   // 순수 공백 런은 버린다(시각적 의미 없음).
   return out.filter((r) => r.text.trim() !== "");
+}
+
+/** 두 글자색이 같은지(기본 검정 취급). 런 결합 가부 판정용. */
+function sameColor(a: [number, number, number] | undefined, b: [number, number, number] | undefined): boolean {
+  const x = a ?? [0, 0, 0];
+  const y = b ?? [0, 0, 0];
+  return x[0] === y[0] && x[1] === y[1] && x[2] === y[2];
+}
+
+/** 두 회전/전단 행렬이 (근사적으로) 같은지. 둘 다 직립(undefined)이면 같음. */
+function sameRot(a: [number, number, number, number] | undefined, b: [number, number, number, number] | undefined): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return Math.abs(a[0] - b[0]) < 1e-3 && Math.abs(a[1] - b[1]) < 1e-3 && Math.abs(a[2] - b[2]) < 1e-3 && Math.abs(a[3] - b[3]) < 1e-3;
+}
+
+/** 경로 명령(장치좌표)의 축정렬 경계상자 → 클립 사각형. 비-사각형 클립은 외접 사각형으로 근사. */
+function pathBBox(cmds: PathCmd[]): ClipRect | undefined {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const cm of cmds) for (let i = 0; i + 1 < cm.c.length; i += 2) {
+    const x = cm.c[i]!, y = cm.c[i + 1]!;
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  return x1 >= x0 && y1 >= y0 ? [x0, y0, x1, y1] : undefined;
+}
+/** 두 클립의 교집합. 한쪽이 없으면 다른쪽. 빈 교집합은 0크기(아무것도 안 보임)로. */
+function clipIntersect(a: ClipRect | undefined, b: ClipRect | undefined): ClipRect | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const r: ClipRect = [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
+  return r[2] >= r[0] && r[3] >= r[1] ? r : [a[0], a[1], a[0], a[1]];
 }
 
 const clampByte = (v: number): number => Math.max(0, Math.min(255, Math.round(v * 255)));
