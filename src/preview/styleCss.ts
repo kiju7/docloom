@@ -178,14 +178,22 @@ function themeFont(theme: ThemeFonts | undefined, ref: string | undefined): stri
   return undefined;
 }
 
-/** theme1.xml → major/minor 폰트(latin/ea). 가벼운 정규식 추출. */
+/** theme1.xml → major/minor 폰트(latin/ea). 가벼운 정규식 추출.
+ *  한글 문서는 EastAsia 폰트를 빈 `<a:ea/>` 대신 `<a:font script="Hang">`(한글 전용)으로
+ *  지정하는 경우가 많다. 그래서 `<a:ea>` 가 비면 Hang(없으면 Hans/Hant) 스크립트 폰트를 쓴다. */
 function parseThemeFonts(themeXml: string): ThemeFonts {
   const grab = (block: string): { latin?: string; ea?: string } => {
     const m = themeXml.match(new RegExp(`<a:${block}>([\\s\\S]*?)</a:${block}>`));
     if (!m) return {};
-    const latin = m[1]!.match(/<a:latin[^>]*typeface="([^"]*)"/);
-    const ea = m[1]!.match(/<a:ea[^>]*typeface="([^"]*)"/);
-    return { latin: latin?.[1] || undefined, ea: ea?.[1] || undefined };
+    const body = m[1]!;
+    const latin = body.match(/<a:latin[^>]*typeface="([^"]*)"/);
+    let ea = body.match(/<a:ea[^>]*typeface="([^"]*)"/)?.[1] || undefined;
+    if (!ea) {
+      const scriptFont = (sc: string) =>
+        body.match(new RegExp(`<a:font script="${sc}"[^>]*typeface="([^"]*)"`))?.[1] || undefined;
+      ea = scriptFont("Hang") ?? scriptFont("Hans") ?? scriptFont("Hant") ?? scriptFont("Jpan");
+    }
+    return { latin: latin?.[1] || undefined, ea };
   };
   return { major: grab("majorFont"), minor: grab("minorFont") };
 }

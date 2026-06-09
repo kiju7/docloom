@@ -63,3 +63,26 @@ describe("줄간격(w:spacing line) CSS 추출", () => {
     );
   });
 });
+
+describe("theme 한글 폰트(script=Hang) 해석", () => {
+  it("빈 <a:ea/> 라도 script=Hang 폰트(맑은 고딕)를 EastAsia 폰트로 쓴다", () => {
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr>
+  <w:rFonts w:asciiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:hAnsiTheme="minorHAnsi"/>
+</w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+</w:styles>`;
+    const theme = `<?xml version="1.0"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme>
+<a:minorFont>
+  <a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/>
+  <a:font script="Hang" typeface="맑은 고딕"/>
+</a:minorFont>
+<a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/></a:majorFont>
+</a:fontScheme></a:themeElements></a:theme>`;
+    const css = extractStyleCss(styles, palette, { themeXml: theme });
+    expect(css).toContain("맑은 고딕");
+    expect(css).toContain("Calibri"); // latin 은 그대로
+  });
+});
