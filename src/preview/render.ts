@@ -33,6 +33,9 @@ import {
 
 export type { PageGeom, SectionProps } from "../docx/section.js";
 
+/** auto 줄간격(line/240)을 CSS line-height 배수로 환산할 때 곱하는 폰트 메트릭 보정(~맑은 고딕). */
+const LINE_AUTO_FACTOR = 1.7;
+
 interface Ctx {
   palette: Palette;
   rels: Map<string, string>; // rId → target (word/ 기준 상대경로)
@@ -40,6 +43,7 @@ interface Ctx {
   numbering: Numbering;
   counters: Map<string, number[]>; // numId → 레벨별 카운터
   styleNum: Map<string, { numId: string; ilvl: number }>; // styleId → 스타일에 박힌 numPr
+  tableStyleBorders: Map<string, Borders>; // 표 styleId → tblBorders
 }
 
 export interface RenderResult {
@@ -62,6 +66,7 @@ export function renderPreviewBody(parts: Record<string, Uint8Array>, palette: Pa
     numbering: buildNumbering(parts, dec),
     counters: new Map(),
     styleNum: buildStyleNum(parts, dec),
+    tableStyleBorders: buildTableStyleBorders(parts, dec),
   };
 
   const doc = parseXml(dec.decode(parts["word/document.xml"]!));
@@ -124,8 +129,9 @@ function renderParagraph(p: XmlNode, ctx: Ctx): string {
   const styleKey = styleKeyFromDocxId(ctx.palette, styleId);
   const tag = htmlTagFromStyleKey(ctx.palette, styleKey);
 
-  const style = paragraphInlineStyle(pPr);
-  const marker = listMarker(pPr, styleId, ctx);
+  const listLvl = resolveListLevel(pPr, styleId, ctx);
+  const style = paragraphInlineStyle(pPr, listLvl?.level);
+  const marker = listLvl ? listMarker(listLvl, ctx) : "";
   const inner = renderRuns(p, ctx);
 
   const cls = classFromStyleKey(styleKey);
@@ -133,9 +139,10 @@ function renderParagraph(p: XmlNode, ctx: Ctx): string {
   return `<${tag} class="${cls}"${styleAttr}>${marker}${inner || "&#8203;"}</${tag}>`;
 }
 
-/** 문단 직접서식 → 인라인 CSS (정렬·들여쓰기·간격·문단 하단 테두리). */
-function paragraphInlineStyle(pPr: XmlNode | undefined): string {
-  if (!pPr) return "";
+/** 문단 직접서식 → 인라인 CSS (정렬·들여쓰기·간격·문단 하단 테두리).
+ *  목록 문단인데 직접 w:ind 가 없으면 번호 레벨의 들여쓰기(내어쓰기 포함)를 대신 적용한다. */
+function paragraphInlineStyle(pPr: XmlNode | undefined, listLevel?: NumLevel): string {
+  if (!pPr) return listLevel ? levelIndentCss(listLevel) : "";
   const kids = childrenOf(pPr);
   const d: string[] = [];
 
@@ -153,6 +160,9 @@ function paragraphInlineStyle(pPr: XmlNode | undefined): string {
     const hanging = Number(attrOf(ind, "w:hanging"));
     if (Number.isFinite(hanging)) d.push(`text-indent:${round(-hanging / 20)}pt`);
     else if (Number.isFinite(firstLine)) d.push(`text-indent:${round(firstLine / 20)}pt`);
+  } else if (listLevel) {
+    const li = levelIndentCss(listLevel);
+    if (li) d.push(li);
   }
 
   const spacing = findChild(kids, "w:spacing");
@@ -164,9 +174,10 @@ function paragraphInlineStyle(pPr: XmlNode | undefined): string {
     const line = Number(attrOf(spacing, "w:line"));
     const lineRule = attrOf(spacing, "w:lineRule");
     if (Number.isFinite(line)) {
-      // auto(기본): 240=1줄 배수. atLeast/exact: twips → pt 높이.
+      // auto(기본): 240=1줄. CSS line-height 배수로 환산 시 폰트 자연 줄높이 보정(~1.7).
+      // atLeast/exact: twips → pt 절대 높이.
       if (lineRule === "exact" || lineRule === "atLeast") d.push(`line-height:${round(line / 20)}pt`);
-      else d.push(`line-height:${round(line / 240)}`);
+      else d.push(`line-height:${round((line / 240) * LINE_AUTO_FACTOR)}`);
     }
   }
 
@@ -189,7 +200,13 @@ function renderRuns(container: XmlNode, ctx: Ctx): string {
   for (const child of childrenOf(container)) {
     const tag = tagOf(child);
     if (tag === "w:r") out += renderRun(child, ctx);
-    else if (tag === "w:hyperlink") out += renderRuns(child, ctx); // 링크 안의 런들
+    else if (tag === "w:hyperlink") {
+      // 외부 링크(r:id)는 파란 밑줄. 내부 앵커(목차 등)는 본문색 유지.
+      const inner = renderRuns(child, ctx);
+      out += attrOf(child, "r:id")
+        ? `<span style="color:#0563c1;text-decoration:underline">${inner}</span>`
+        : inner;
+    }
     else if (tag === "w:sdt") out += renderRuns({ "w:sdtContent": sdtContentChildren(child) }, ctx); // 인라인 sdt 펼치기
     else if (tag === "w:fldSimple") out += renderFldSimple(child, ctx);
   }
@@ -299,10 +316,72 @@ function mediaDataUri(parts: Record<string, Uint8Array>, target: string): string
 
 // ── 표 ────────────────────────────────────────────────────────────────────
 
+interface Side {
+  val: string; // single, double, nil, dashed, thickThinSmallGap …
+  sz: number; // 1/8 pt
+  color?: string; // 16진수 or "auto"
+}
+type BorderSide = "top" | "left" | "bottom" | "right" | "insideH" | "insideV";
+type Borders = Partial<Record<BorderSide, Side>>;
+
+/** w:tblBorders/w:tcBorders 노드 → Borders. */
+function readBorders(node: XmlNode | undefined): Borders | undefined {
+  if (!node) return undefined;
+  const out: Borders = {};
+  for (const side of ["top", "left", "bottom", "right", "insideH", "insideV"] as BorderSide[]) {
+    const s = findChild(childrenOf(node), `w:${side}`);
+    if (!s) continue;
+    out[side] = {
+      val: attrOf(s, "w:val") ?? "single",
+      sz: Number(attrOf(s, "w:sz") ?? "4"),
+      color: attrOf(s, "w:color"),
+    };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Side → CSS border 값. nil/none 이면 "none". */
+function sideToCss(s: Side | undefined): string {
+  if (!s || s.val === "nil" || s.val === "none") return "none";
+  const w = Number.isFinite(s.sz) && s.sz > 0 ? s.sz / 8 : 0.5; // sz: 1/8 pt
+  const color = s.color && s.color.toLowerCase() !== "auto" ? `#${s.color}` : "#000";
+  // double·thickThin·thinThick 계열은 이중선, dashed/dotted 는 그대로, 그 외 single.
+  const style = /double|thick|thin/i.test(s.val)
+    ? "double"
+    : s.val === "dashed"
+      ? "dashed"
+      : s.val === "dotted"
+        ? "dotted"
+        : "solid";
+  return `${round(w)}pt ${style} ${color}`;
+}
+
+/** styles.xml 의 표 스타일별 tblBorders 맵. */
+function buildTableStyleBorders(
+  parts: Record<string, Uint8Array>,
+  dec: InstanceType<typeof TextDecoder>,
+): Map<string, Borders> {
+  const map = new Map<string, Borders>();
+  const buf = parts["word/styles.xml"];
+  if (!buf) return map;
+  const tree = parseXml(dec.decode(buf));
+  const root = tree.find((n) => tagOf(n) === "w:styles");
+  if (!root) return map;
+  for (const st of findChildren(childrenOf(root), "w:style")) {
+    if (attrOf(st, "w:type") !== "table") continue;
+    const styleId = attrOf(st, "w:styleId");
+    if (!styleId) continue;
+    const tblPr = findChild(childrenOf(st), "w:tblPr");
+    const b = tblPr ? readBorders(findChild(childrenOf(tblPr), "w:tblBorders")) : undefined;
+    if (b) map.set(styleId, b);
+  }
+  return map;
+}
+
 interface RenderedCell {
   html: string;
   colspan: number;
-  style: string; // CSS 선언 묶음 (배경·세로정렬)
+  style: string; // CSS 선언 묶음 (배경·세로정렬·테두리)
   rows: number; // vMerge rowspan (1 = 병합 없음)
 }
 
@@ -312,7 +391,24 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
   const grid: (RenderedCell | undefined)[] = []; // 열 index → 현재 열린 restart 셀
   const rowCells: RenderedCell[][] = [];
 
-  for (const tr of findChildren(childrenOf(tbl), "w:tr")) {
+  // 표 테두리 소스: 직접 tblBorders > 표 스타일 tblBorders. 하나라도 있으면 셀마다
+  // 실제 테두리를 인라인으로 입혀(회색 기본 테두리 대신) 원본 색·굵기·변별을 살린다.
+  const tblPr = findChild(childrenOf(tbl), "w:tblPr");
+  const tblPrKids = tblPr ? childrenOf(tblPr) : [];
+  const styleId = attrOf(findChild(tblPrKids, "w:tblStyle") ?? {}, "w:val");
+  const directBorders = readBorders(findChild(tblPrKids, "w:tblBorders"));
+  const styleBorders = styleId ? ctx.tableStyleBorders.get(styleId) : undefined;
+  const tableBorders: Borders | undefined =
+    directBorders || styleBorders ? { ...(styleBorders ?? {}), ...(directBorders ?? {}) } : undefined;
+
+  const trs = findChildren(childrenOf(tbl), "w:tr");
+  const numRows = trs.length;
+  const gridDef = findChild(childrenOf(tbl), "w:tblGrid"); // tblGrid 는 tbl 직속
+  const numCols = gridDef ? findChildren(childrenOf(gridDef), "w:gridCol").length : 0;
+
+  let hasAnyBorderSource = !!tableBorders;
+
+  trs.forEach((tr, rowIndex) => {
     const cellsInRow: RenderedCell[] = [];
     let col = 0;
     for (const tc of findChildren(childrenOf(tr), "w:tc")) {
@@ -321,6 +417,7 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
       let colspan = 1;
       const decls: string[] = [];
       let vMerge: string | undefined;
+      let tcBorders: Borders | undefined;
       if (tcPr) {
         const p = childrenOf(tcPr);
         const gs = Number(attrOf(findChild(p, "w:gridSpan") ?? {}, "w:val"));
@@ -332,6 +429,8 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
         if (va) decls.push(`vertical-align:${va}`);
         const vm = findChild(p, "w:vMerge");
         if (vm) vMerge = attrOf(vm, "w:val") ?? "continue";
+        tcBorders = readBorders(findChild(p, "w:tcBorders"));
+        if (tcBorders) hasAnyBorderSource = true;
       }
 
       if (vMerge === "continue") {
@@ -339,6 +438,23 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
         if (owner) owner.rows += 1; // 위 restart 셀의 rowspan 증가
         col += colspan;
         continue;
+      }
+
+      // 셀 위치별 실효 테두리: tcBorders > (가장자리면 tblBorders 외곽변, 안쪽이면 insideH/V).
+      if (tableBorders || tcBorders) {
+        const lastCol = numCols > 0 ? col + colspan >= numCols : true; // grid 모르면 보수적으로 외곽 취급
+        const pick = (side: "top" | "bottom" | "left" | "right", outer: boolean, inner: BorderSide): Side | undefined =>
+          tcBorders?.[side] ?? (outer ? tableBorders?.[side] : tableBorders?.[inner]);
+        const top = pick("top", rowIndex === 0, "insideH");
+        const bottom = pick("bottom", rowIndex === numRows - 1, "insideH");
+        const left = pick("left", col === 0, "insideV");
+        const right = pick("right", lastCol, "insideV");
+        decls.push(
+          `border-top:${sideToCss(top)}`,
+          `border-bottom:${sideToCss(bottom)}`,
+          `border-left:${sideToCss(left)}`,
+          `border-right:${sideToCss(right)}`,
+        );
       }
 
       const cell: RenderedCell = {
@@ -352,7 +468,7 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
       col += colspan;
     }
     rowCells.push(cellsInRow);
-  }
+  });
 
   const rows = rowCells
     .map((cells) => {
@@ -366,7 +482,9 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
       return `<tr>${tds}</tr>`;
     })
     .join("");
-  return `<table class="docloom-table"><tbody>${rows}</tbody></table>`;
+  // 실제 테두리를 인라인으로 입힌 표는 회색 기본 테두리를 끄도록 클래스로 표시.
+  const cls = hasAnyBorderSource ? "docloom-table docloom-table-bordered" : "docloom-table";
+  return `<table class="${cls}"><tbody>${rows}</tbody></table>`;
 }
 
 // ── 목록(글머리기호/번호) ─────────────────────────────────────────────────
@@ -375,6 +493,9 @@ interface NumLevel {
   numFmt: string;
   lvlText: string;
   bulletFont?: string; // 글머리표 글리프 폰트(Wingdings/Symbol 판별용)
+  indLeft?: number; // 레벨 들여쓰기(twips)
+  indHanging?: number; // 내어쓰기(twips)
+  indFirstLine?: number; // 첫줄 들여쓰기(twips)
 }
 interface Numbering {
   // numId → ilvl → level
@@ -406,7 +527,13 @@ function buildNumbering(parts: Record<string, Uint8Array>, dec: InstanceType<typ
       const bulletFont = rFonts
         ? attrOf(rFonts, "w:ascii") ?? attrOf(rFonts, "w:hAnsi") ?? attrOf(rFonts, "w:cs")
         : undefined;
-      lvls.set(ilvl, { numFmt, lvlText, bulletFont });
+      const lvlPPr = findChild(lk, "w:pPr");
+      const lvlInd = lvlPPr ? findChild(childrenOf(lvlPPr), "w:ind") : undefined;
+      const num = (v: string | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
+      const indLeft = lvlInd ? num(attrOf(lvlInd, "w:left") ?? attrOf(lvlInd, "w:start")) : undefined;
+      const indHanging = lvlInd ? num(attrOf(lvlInd, "w:hanging")) : undefined;
+      const indFirstLine = lvlInd ? num(attrOf(lvlInd, "w:firstLine")) : undefined;
+      lvls.set(ilvl, { numFmt, lvlText, bulletFont, indLeft, indHanging, indFirstLine });
     }
     abstract.set(aId, lvls);
   }
@@ -474,8 +601,21 @@ function bulletGlyph(lvlText: string, font?: string): string {
   return lvlText; // "-", "*", "o", "▪" 등 일반 글자 그대로
 }
 
-/** numPr → 마커 HTML. 글머리기호(실제 lvlText) 또는 번호(카운터). 없으면 "". */
-function listMarker(pPr: XmlNode | undefined, styleId: string | undefined, ctx: Ctx): string {
+/** 번호 레벨의 들여쓰기 → CSS(margin-left + 내어쓰기 text-indent). 마커가 내어쓰기 칸에 놓인다. */
+function levelIndentCss(level: NumLevel): string {
+  const d: string[] = [];
+  if (level.indLeft !== undefined) d.push(`margin-left:${round(level.indLeft / 20)}pt`);
+  if (level.indHanging !== undefined) d.push(`text-indent:${round(-level.indHanging / 20)}pt`);
+  else if (level.indFirstLine !== undefined) d.push(`text-indent:${round(level.indFirstLine / 20)}pt`);
+  return d.join(";");
+}
+
+/** 문단의 목록 레벨 해석: 직접 numPr > 스타일 numPr. 없거나 numId=0 이면 null. */
+function resolveListLevel(
+  pPr: XmlNode | undefined,
+  styleId: string | undefined,
+  ctx: Ctx,
+): { level: NumLevel; numId: string; ilvl: number } | null {
   let numId: string | undefined;
   let ilvl = 0;
   const numPr = pPr ? findChild(childrenOf(pPr), "w:numPr") : undefined;
@@ -487,10 +627,15 @@ function listMarker(pPr: XmlNode | undefined, styleId: string | undefined, ctx: 
     numId = s.numId;
     ilvl = s.ilvl;
   }
-  if (!numId || numId === "0") return ""; // numId 0 = 번호 제거(Word 관례)
+  if (!numId || numId === "0") return null; // numId 0 = 번호 제거(Word 관례)
   const level = ctx.numbering.levels.get(numId)?.get(ilvl);
-  if (!level) return "";
+  if (!level) return null;
+  return { level, numId, ilvl };
+}
 
+/** 목록 레벨 → 마커 HTML. 글머리기호(실제 lvlText) 또는 번호(카운터). */
+function listMarker(resolved: { level: NumLevel; numId: string; ilvl: number }, ctx: Ctx): string {
+  const { level, numId, ilvl } = resolved;
   if (level.numFmt === "none") return "";
   if (level.numFmt === "bullet") {
     return `<span class="docloom-marker">${escapeHtml(bulletGlyph(level.lvlText, level.bulletFont))}</span> `;

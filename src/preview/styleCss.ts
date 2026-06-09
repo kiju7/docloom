@@ -16,6 +16,10 @@
 import type { Palette } from "../palette/palette.js";
 import { parseXml, tagOf, childrenOf, attrOf, findChild, type XmlNode } from "../docx/ooxml.js";
 
+/** auto 줄간격(line/240)을 CSS line-height 배수로 환산할 때 곱하는 폰트 메트릭 보정.
+ *  본문 한글 폰트(맑은 고딕 등) 자연 줄높이/em ≈ 1.7. truth PDF 의 줄간격과 맞춘 값. */
+const LINE_AUTO_FACTOR = 1.7;
+
 interface TextProps {
   fontSizePt?: number;
   bold?: boolean;
@@ -24,6 +28,7 @@ interface TextProps {
   color?: string;
   fontFamily?: string;
   align?: string;
+  lineHeight?: string; // CSS line-height 값(배수 또는 pt)
   marginTopPt?: number;
   marginBottomPt?: number;
   indentLeftPt?: number;
@@ -199,12 +204,18 @@ function readPPr(pPr: XmlNode | undefined): TextProps {
     if (Number.isFinite(after)) p.marginBottomPt = after / 20;
     const before = Number(attrOf(spacing, "w:before"));
     if (Number.isFinite(before)) p.marginTopPt = before / 20;
-    // 줄간격(w:line)은 의도적으로 CSS 로 내보내지 않는다.
-    // Word 의 "한 줄"(line=240~276, lineRule=auto)은 폰트 메트릭 기반 leading 이라
-    // CSS line-height 1.0~1.15 보다 실제로 더 넉넉하게 렌더된다. truth PDF 대비
-    // 그대로 적용하면 줄이 너무 빽빽해져 충실도(SSIM)가 떨어진다(실측 확인). 페이지
-    // 레이아웃의 넉넉한 기본 line-height(1.7)를 유지하는 편이 truth 에 더 가깝다.
-    // exact/atLeast 절대 줄간격 지원은 별도 보정계수 검증 후 도입 — 백로그.
+    // 줄간격: exact/atLeast → 절대 pt. auto → (line/240) × 폰트메트릭 보정.
+    // Word 의 auto 한 줄(=240)은 폰트의 ascent+descent+linegap 높이라, CSS line-height
+    // 의 "글자크기 배수"로 환산하려면 폰트 자연 줄높이 비율을 곱해야 한다. 본문 한글
+    // 폰트(맑은 고딕 등)의 그 비율이 ~1.7 이라, 그대로면(=line/240) 너무 빽빽해진다.
+    const line = Number(attrOf(spacing, "w:line"));
+    const lineRule = attrOf(spacing, "w:lineRule");
+    if (Number.isFinite(line) && line > 0) {
+      p.lineHeight =
+        lineRule === "exact" || lineRule === "atLeast"
+          ? `${round(line / 20)}pt`
+          : `${round((line / 240) * LINE_AUTO_FACTOR)}`;
+    }
   }
   const ind = findChild(kids, "w:ind");
   if (ind) {
@@ -292,6 +303,7 @@ function propsToCss(p: TextProps): string {
   if (p.color) d.push(`color:${p.color}`);
   if (p.fontFamily) d.push(`font-family:${p.fontFamily}, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif`);
   if (p.align) d.push(`text-align:${p.align}`);
+  if (p.lineHeight) d.push(`line-height:${p.lineHeight}`);
   if (p.marginTopPt !== undefined) d.push(`margin-top:${round(p.marginTopPt)}pt`);
   if (p.marginBottomPt !== undefined) d.push(`margin-bottom:${round(p.marginBottomPt)}pt`);
   if (p.indentLeftPt !== undefined) d.push(`margin-left:${round(p.indentLeftPt)}pt`);

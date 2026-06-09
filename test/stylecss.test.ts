@@ -42,16 +42,24 @@ describe("문단 테두리·음영 CSS 추출", () => {
   });
 });
 
-describe("줄간격(w:spacing line) 은 CSS 로 내보내지 않는다", () => {
-  // Word 의 auto 줄간격은 폰트 leading 기반이라 CSS line-height 로 직역하면 truth 보다
-  // 빽빽해진다(실측 SSIM 하락). 그래서 line-height 는 페이지 기본값(1.7)에 맡긴다.
-  it("스타일에 w:line 이 있어도 line-height 규칙을 만들지 않는다", () => {
-    const styles = `<?xml version="1.0"?>
+describe("줄간격(w:spacing line) CSS 추출", () => {
+  const st = (sp: string) => `<?xml version="1.0"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
 <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
 <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/>
-  <w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr></w:style>
+  <w:pPr>${sp}</w:pPr></w:style>
 </w:styles>`;
-    expect(extractStyleCss(styles, palette)).not.toMatch(/line-height/);
+
+  it("auto 줄간격은 (line/240)×1.7 보정으로 line-height 배수를 만든다", () => {
+    // 240/240 × 1.7 = 1.7
+    expect(extractStyleCss(st('<w:spacing w:line="240" w:lineRule="auto"/>'), palette)).toMatch(
+      /\.s-title\s*\{[^}]*line-height:1\.7\b/,
+    );
+  });
+
+  it("exact/atLeast 줄간격은 절대 pt 로 변환한다 (240 → 12pt)", () => {
+    expect(extractStyleCss(st('<w:spacing w:line="240" w:lineRule="exact"/>'), palette)).toMatch(
+      /\.s-title\s*\{[^}]*line-height:12pt/,
+    );
   });
 });

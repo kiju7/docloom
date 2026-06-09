@@ -29,6 +29,8 @@ body {
 }
 .docloom-doc table, .docloom-table { border-collapse: collapse; margin: 12px 0; width: 100%; }
 .docloom-doc td, .docloom-table td { border: 1px solid #c9ccd1; padding: 6px 10px; vertical-align: top; }
+/* 원본 테두리를 인라인으로 입힌 표: 회색 기본 테두리 끄고 셀 인라인 border 만 따른다. */
+.docloom-table-bordered td { border: 0; }
 .docloom-doc .s-frozen {
   border: 1px dashed #b0b4ba; border-radius: 6px;
   padding: 10px 12px; margin: 12px 0;
@@ -158,6 +160,7 @@ body { margin: 0; padding: 28px 0; background: #eceef0;
 /* 본문 표: 테두리 있음 */
 .docloom-table { border-collapse: collapse; width: 100%; margin: 8px 0; }
 .docloom-table td { border: 1px solid #c9ccd1; padding: 6px 10px; vertical-align: top; }
+.docloom-table-bordered td { border: 0; }
 /* 머리말/꼬리말의 레이아웃 표: 테두리 없음 (더 구체적 선택자로 위 규칙을 확실히 덮음) */
 .page-header .docloom-table, .page-footer .docloom-table { margin: 0; }
 .page-header .docloom-table td, .page-footer .docloom-table td { border: none; padding: 0 4px; }

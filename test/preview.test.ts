@@ -89,4 +89,57 @@ describe("목록 마커 충실도", () => {
     const body = renderPreviewBody(makeParts({ docBody: zeroNum, numbering: numbering("-") }), DEFAULT_PALETTE).body;
     expect(body).not.toContain('class="docloom-marker"');
   });
+
+  it("번호 레벨의 들여쓰기(w:ind)를 목록 문단에 적용한다(내어쓰기 포함)", () => {
+    const numWithInd =
+      `<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">` +
+      `<w:numFmt w:val="bullet"/><w:lvlText w:val="-"/>` +
+      `<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>` +
+      `</w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>`;
+    const body = renderPreviewBody(makeParts({ docBody: numParaDirect, numbering: numWithInd }), DEFAULT_PALETTE).body;
+    expect(body).toMatch(/margin-left:36pt/); // 720 twips / 20
+    expect(body).toMatch(/text-indent:-18pt/); // hanging 360 / 20
+  });
+});
+
+// ── 표 테두리 충실도 ────────────────────────────────────────────────────────
+
+describe("표·셀 테두리", () => {
+  it("셀의 tcBorders(색·변별·nil)를 인라인 border 로 렌더하고 회색 기본 테두리를 끈다", () => {
+    const tbl =
+      `<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcBorders>` +
+      `<w:top w:val="single" w:sz="36" w:color="000080"/><w:left w:val="nil"/>` +
+      `<w:bottom w:val="thickThinSmallGap" w:sz="36" w:color="333399"/><w:right w:val="nil"/>` +
+      `</w:tcBorders></w:tcPr><w:p><w:r><w:t>제목</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const body = renderPreviewBody(makeParts({ docBody: tbl }), DEFAULT_PALETTE).body;
+    expect(body).toContain("docloom-table-bordered");
+    expect(body).toMatch(/border-top:4\.5pt solid #000080/); // sz 36/8 = 4.5pt
+    expect(body).toMatch(/border-left:none/);
+    expect(body).toMatch(/border-bottom:4\.5pt double #333399/); // thickThin → double
+  });
+
+  it("표 스타일(tblStyle)의 tblBorders 를 셀 테두리로 적용한다", () => {
+    const styles =
+      `<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/>` +
+      `<w:tblPr><w:tblBorders>` +
+      `<w:top w:val="single" w:sz="4" w:color="auto"/><w:left w:val="single" w:sz="4" w:color="auto"/>` +
+      `<w:bottom w:val="single" w:sz="4" w:color="auto"/><w:right w:val="single" w:sz="4" w:color="auto"/>` +
+      `<w:insideH w:val="single" w:sz="4" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:color="auto"/>` +
+      `</w:tblBorders></w:tblPr></w:style>`;
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/></w:tblPr><w:tblGrid><w:gridCol/></w:tblGrid>` +
+      `<w:tr><w:tc><w:p><w:r><w:t>셀</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const body = renderPreviewBody(makeParts({ docBody: tbl, styles }), DEFAULT_PALETTE).body;
+    expect(body).toContain("docloom-table-bordered");
+    expect(body).toMatch(/border-top:0\.5pt solid #000/); // sz 4/8 = 0.5pt, auto → #000
+  });
+
+  it("테두리 정보가 없는 표는 회색 기본 테두리(클래스 미부여)를 유지한다", () => {
+    const tbl =
+      `<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid>` +
+      `<w:tr><w:tc><w:p><w:r><w:t>셀</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const body = renderPreviewBody(makeParts({ docBody: tbl }), DEFAULT_PALETTE).body;
+    expect(body).not.toContain("docloom-table-bordered");
+  });
 });
