@@ -16,9 +16,11 @@
 import type { Palette } from "../palette/palette.js";
 import { parseXml, tagOf, childrenOf, attrOf, findChild, type XmlNode } from "../docx/ooxml.js";
 
-/** auto 줄간격(line/240)을 CSS line-height 배수로 환산할 때 곱하는 폰트 메트릭 보정.
- *  본문 한글 폰트(맑은 고딕 등) 자연 줄높이/em ≈ 1.7. truth PDF 의 줄간격과 맞춘 값. */
-const LINE_AUTO_FACTOR = 1.7;
+/** auto 줄간격(line/240=명목 배수)을 CSS line-height 로 환산할 때 곱하는 폰트 단일행 비율.
+ *  표준 폰트(한컴/일반 뷰어)의 "한 줄" ≈ 1.15×em 에 맞춘 값 → docx 명목값에 충실(촘촘).
+ *  (Word+맑은 고딕은 ~1.7 로 훨씬 넉넉하게 렌더하지만, 그 truth PDF 가 아니라
+ *   문서가 지정한 값에 맞춘다.) */
+const LINE_AUTO_FACTOR = 1.15;
 
 interface TextProps {
   fontSizePt?: number;

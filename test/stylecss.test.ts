@@ -50,10 +50,10 @@ describe("줄간격(w:spacing line) CSS 추출", () => {
   <w:pPr>${sp}</w:pPr></w:style>
 </w:styles>`;
 
-  it("auto 줄간격은 (line/240)×1.7 보정으로 line-height 배수를 만든다", () => {
-    // 240/240 × 1.7 = 1.7
-    expect(extractStyleCss(st('<w:spacing w:line="240" w:lineRule="auto"/>'), palette)).toMatch(
-      /\.s-title\s*\{[^}]*line-height:1\.7\b/,
+  it("auto 줄간격은 (line/240)×1.15 보정으로 명목값에 충실한 line-height 를 만든다", () => {
+    // 480/240 × 1.15 = 2.3 (2줄 간격)
+    expect(extractStyleCss(st('<w:spacing w:line="480" w:lineRule="auto"/>'), palette)).toMatch(
+      /\.s-title\s*\{[^}]*line-height:2\.3\b/,
     );
   });
 

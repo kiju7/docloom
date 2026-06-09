@@ -33,8 +33,9 @@ import {
 
 export type { PageGeom, SectionProps } from "../docx/section.js";
 
-/** auto 줄간격(line/240)을 CSS line-height 배수로 환산할 때 곱하는 폰트 메트릭 보정(~맑은 고딕). */
-const LINE_AUTO_FACTOR = 1.7;
+/** auto 줄간격(line/240=명목 배수)을 CSS line-height 로 환산할 때 곱하는 폰트 단일행 비율(~1.15).
+ *  truth PDF(Word+맑은 고딕, ~1.7)가 아니라 docx 명목값에 충실(한컴/일반 뷰어 기준). */
+const LINE_AUTO_FACTOR = 1.15;
 
 interface Ctx {
   palette: Palette;
