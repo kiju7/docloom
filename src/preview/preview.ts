@@ -11,13 +11,26 @@
  *                          없으면 FALLBACK_TYPOGRAPHY 사용)
  */
 
+/**
+ * 한글 웹폰트(Pretendard) — 문서 폰트(맑은 고딕 등)가 설치 안 된 환경에서도 모든 뷰어가
+ * 같은 한글 폰트로 렌더되도록 폴백으로 싣는다. font-family 체인의 문서폰트·Malgun **뒤**에
+ * 두므로, 맑은 고딕이 있는 환경(Windows/MS Office)은 여전히 truth 와 같은 폰트를 쓴다.
+ * variable woff2 1종(swap)이라 본문은 즉시 보이고 폰트 도착 시 교체된다.
+ */
+export const WEBFONT_CSS = `
+@font-face {
+  font-family: "Pretendard";
+  font-weight: 45 920; font-style: normal; font-display: swap;
+  src: url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/woff2/PretendardVariable.woff2") format("woff2-variations");
+}`;
+
 /** 구조 스타일 — 한 페이지처럼 보이게 하는 골격. 타이포그래피는 별도. */
 export const LAYOUT_CSS = `
 :root { --page: 800px; }
 body {
   margin: 0; padding: 32px 0;
   background: #f2f3f5;
-  font-family: -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  font-family: -apple-system, "Segoe UI", "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif;
   color: #1a1a1a;
 }
 .docloom-doc {
@@ -94,7 +107,7 @@ export function toPreviewHtml(bodyHtml: string, opts: PreviewOptions = {}): stri
   const title = escapeAttr(opts.title ?? "docloom preview");
   const typography = opts.typographyCss ?? FALLBACK_TYPOGRAPHY;
   const core = opts.replaceCss ? "" : `${LAYOUT_CSS}\n${typography}`;
-  const css = core + (opts.css ? `\n${opts.css}` : "");
+  const css = `${WEBFONT_CSS}\n${core}` + (opts.css ? `\n${opts.css}` : "");
   return `<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -121,7 +134,7 @@ import type { RenderResult } from "./render.js";
 /** 페이지 레이아웃 CSS — A4 시트, 머리말/꼬리말은 여백 안에 절대배치. 치수는 인라인 var. */
 export const PAGE_CSS = `
 body { margin: 0; padding: 28px 0; background: #eceef0;
-  font-family: -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  font-family: -apple-system, "Segoe UI", "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif;
   color: #1a1a1a; }
 .page {
   position: relative; box-sizing: border-box;
@@ -203,6 +216,7 @@ export function toPagedHtml(r: RenderResult, opts: PagedOptions = {}): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <style>
+${WEBFONT_CSS}
 :root{${vars}}
 ${PAGE_CSS}
 ${typography}

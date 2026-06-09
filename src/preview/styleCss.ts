@@ -311,7 +311,8 @@ function propsToCss(p: TextProps): string {
   if (p.italic) d.push(`font-style:italic`);
   if (p.underline) d.push(`text-decoration:underline`);
   if (p.color) d.push(`color:${p.color}`);
-  if (p.fontFamily) d.push(`font-family:${p.fontFamily}, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif`);
+  if (p.fontFamily)
+    d.push(`font-family:${p.fontFamily}, "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif`);
   if (p.align) d.push(`text-align:${p.align}`);
   if (p.lineHeight) d.push(`line-height:${p.lineHeight}`);
   if (p.marginTopPt !== undefined) d.push(`margin-top:${round(p.marginTopPt)}pt`);
