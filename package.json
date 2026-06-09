@@ -26,7 +26,9 @@
     "mcp": "node mcp/docloom-mcp.mjs",
     "demo:rhwp": "cp vendor/rhwp/rhwp.js vendor/rhwp/rhwp_bg.wasm demo/",
     "demo:build": "esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=demo/docloom.mjs && esbuild src/web.ts --bundle --format=esm --platform=browser --outfile=demo/docloom-web.mjs && npm run demo:rhwp",
-    "demo": "npm run demo:build && echo '데모 준비 완료 → 브라우저에서 demo/index.html 열기 (또는: npx serve demo)'"
+    "demo": "npm run demo:build && echo '데모 준비 완료 → 브라우저에서 demo/index.html 열기 (또는: npx serve demo)'",
+    "compose:build": "esbuild src/web-compose.ts --bundle --format=esm --platform=browser --outfile=demo/docloom-compose.mjs",
+    "compose": "npm run compose:build && echo 'compose 준비 완료 → npx serve demo 후 http://localhost:3000/compose.html (로컬 Ollama 필요)'"
   },
   "keywords": [
     "docx",

@@ -1,14 +1,22 @@
-// docloom HTTP 서버 — 다른 언어(Python·Go·Java·C++…)에서 호출하기 위한 얇은 한 겹.
+// docloom HTTP 서버 — 다른 언어(Python·Go·Java·C++…) 및 compose 페이지에서 호출하는 얇은 한 겹.
 // 의존성 없이 Node 내장 http 만 사용한다.
 //   npm run build && node server.mjs   →  http://localhost:8080
+//
+// compose(/compose) 는 서버측에서 Ollama 를 호출한다 → 브라우저는 문서+자료만 보내고,
+// LLM 엔드포인트(OLLAMA_HOST)·모델(OLLAMA_MODEL)은 서버 환경변수로만 둔다(클라이언트 비노출).
+//   OLLAMA_HOST  기본 http://localhost:11434   (이 서버에서 도달 가능한 Ollama)
+//   OLLAMA_MODEL 미설정 시 /api/tags 첫 모델 자동 사용
 import { createServer } from "node:http";
-import { previewHtml, encode, decode } from "./dist/index.js";
+import { previewHtml, encode, decode, composeDocument, createOllamaClient, formatFromFilename } from "./dist/index.js";
+
+// .env 자동 로드(있으면). Node 내장 — 의존성 0. 클라우드 배포(Render 등)는 대시보드 env 를 쓰면
+// .env 없이도 동일하게 process.env 로 주입된다. (커스텀 경로: node --env-file=path server.mjs)
+try { process.loadEnvFile(); } catch { /* .env 가 없으면 무시 */ }
 
 const PORT = process.env.PORT || 8080;
+const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "";
 
-// manifest 는 원본 바이트(Uint8Array)를 품고 있어 그대로 JSON 직렬화하면 깨진다.
-// 바이너리를 base64 로 감싸 JSON 안전하게 만들고, decode 시 되돌린다.
-// (클라이언트는 /encode 응답 JSON 을 그대로 /decode 에 돌려보내기만 하면 된다.)
 const replacer = (_k, v) => (v instanceof Uint8Array ? { __u8__: Buffer.from(v).toString("base64") } : v);
 const reviver = (_k, v) => (v && v.__u8__ !== undefined ? new Uint8Array(Buffer.from(v.__u8__, "base64")) : v);
 
@@ -19,18 +27,22 @@ const readBody = (req) =>
     req.on("end", () => resolve(Buffer.concat(chunks)));
   });
 
-// CORS: 브라우저(다른 오리진)에서 fetch 로 직접 호출할 수 있게 허용한다.
-// ALLOW_ORIGIN 환경변수로 특정 도메인만 열 수 있고, 미설정 시 전체(*) 허용.
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
+/** 서버측 Ollama 로 모델 1개 확정(env 우선, 없으면 첫 설치 모델). */
+async function pickModel(llm) {
+  if (OLLAMA_MODEL) return OLLAMA_MODEL;
+  const models = await llm.listModels();
+  if (!models.length) throw new Error("서버에 사용 가능한 Ollama 모델이 없습니다 (ollama pull <model>).");
+  return models[0];
+}
+
 createServer(async (req, res) => {
-  // 모든 응답에 CORS 헤더를 붙인다.
   res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "content-type");
   res.setHeader("Access-Control-Max-Age", "86400");
-  // 프리플라이트(OPTIONS)는 본문 없이 204 로 바로 응답.
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
     return res.end();
@@ -38,24 +50,40 @@ createServer(async (req, res) => {
   try {
     if (req.method !== "POST") {
       res.statusCode = 404;
-      return res.end("POST /preview | /encode | /decode");
+      return res.end("POST /preview | /encode | /decode | /compose");
     }
+    const url = new URL(req.url, "http://localhost");
+    const path = url.pathname;
     const body = await readBody(req);
-    if (req.url === "/preview") {
-      // 문서 바이트 → 미리보기 HTML
+
+    if (path === "/preview") {
+      // 문서 바이트 → 미리보기 HTML. ?name= 으로 포맷 힌트(평문 계열 정확 라우팅).
+      const name = url.searchParams.get("name");
+      const opts = name ? { title: name, format: formatFromFilename(name) } : undefined;
       res.setHeader("content-type", "text/html; charset=utf-8");
-      return res.end(previewHtml(new Uint8Array(body)));
+      return res.end(previewHtml(new Uint8Array(body), opts));
     }
-    if (req.url === "/encode") {
-      // 문서 바이트 → { html(편집용), manifest(복원 키트) }
+    if (path === "/encode") {
       res.setHeader("content-type", "application/json");
       return res.end(JSON.stringify(encode(new Uint8Array(body)), replacer));
     }
-    if (req.url === "/decode") {
-      // /encode 응답 JSON({ html, manifest }) → 양식 보존한 문서 바이트
+    if (path === "/decode") {
       const { html, manifest } = JSON.parse(body.toString("utf8"), reviver);
       res.setHeader("content-type", "application/octet-stream");
       return res.end(Buffer.from(decode(html, manifest)));
+    }
+    if (path === "/compose") {
+      // { doc(base64), material, name } → 서버가 Ollama 로 채움 → { doc(base64), preview, meta }
+      const { doc, material, name } = JSON.parse(body.toString("utf8"));
+      if (!doc || !material) throw new Error("doc, material 이 필요합니다.");
+      const bytes = new Uint8Array(Buffer.from(doc, "base64"));
+      const fmt = name ? formatFromFilename(name) : undefined;
+      const llm = createOllamaClient({ endpoint: OLLAMA_HOST });
+      const model = await pickModel(llm);
+      const { bytes: out, meta } = await composeDocument(bytes, material, { llm, model, format: fmt });
+      // 미리보기는 클라이언트가 렌더한다(특히 hwp 는 rhwp 라야 한글 정상). 서버는 결과 바이트만.
+      res.setHeader("content-type", "application/json");
+      return res.end(JSON.stringify({ doc: Buffer.from(out).toString("base64"), meta: { ...meta, model } }));
     }
     res.statusCode = 404;
     res.end("unknown route");

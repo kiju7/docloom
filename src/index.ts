@@ -88,3 +88,13 @@ export type { Palette, PaletteEntry } from "./palette/palette.js";
 
 export type { DocModel, Block, Run, Mark } from "./model/docModel.js";
 export type { Manifest } from "./model/manifest.js";
+
+// ── compose (양식 채움 + LLM) ───────────────────────────────────────────────
+export { composeDocument, jsonFill, extractDescriptor, applyFill, sanitizeInline } from "./compose/index.js";
+export type {
+  ComposeDeps,
+  ComposeResult,
+} from "./compose/index.js";
+export type { FillStrategy, FillResult, LlmClient, TemplateDescriptor, Slot, RepeatGroup } from "./compose/types.js";
+export { createOllamaClient } from "./llm/ollama.js";
+export type { OllamaOptions } from "./llm/ollama.js";

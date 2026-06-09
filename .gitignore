@@ -3,12 +3,17 @@ dist/
 *.log
 .DS_Store
 
+# 로컬 환경변수(실제 값) — .env.example 만 커밋
+.env
+.env.local
+
 # 빌드/디버그 산출물
 _shapes.mjs
 
-# 데모 번들 + rhwp 런타임 복사본 (npm run demo:build 로 생성)
+# 데모 번들 + rhwp 런타임 복사본 (npm run demo:build / compose:build 로 생성)
 demo/docloom.mjs
 demo/docloom-web.mjs
+demo/docloom-compose.mjs
 demo/rhwp.js
 demo/rhwp_bg.wasm
 
@@ -18,6 +23,8 @@ test/fixtures/sample.doc
 test/fixtures/sample.hwp
 test/fixtures/sample.hwpx
 
-# HWP 작업 산출물(개인 샘플 문서·검증 파생데이터)
-/demo/_samples/
+# HWP 작업 산출물(개인 샘플 문서·검증 파생데이터)는 무시하되,
+# compose 데모용 샘플 양식은 배포(Pages)에 포함되도록 예외.
+/demo/_samples/*
+!/demo/_samples/sample-form.html
 /scoreboards/

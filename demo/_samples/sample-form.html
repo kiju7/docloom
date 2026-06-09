@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>회의록</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", -apple-system, sans-serif;
+    color: #1c2233; background: #fff;
+  }
+  /* A4 한 장(210×297mm ≈ 794×1123px @96dpi)을 꽉 채운다. */
+  .page {
+    width: 794px; min-height: 1123px; margin: 0 auto; padding: 56px 60px;
+    font-size: 13px; line-height: 1.6;
+  }
+  h1 { text-align: center; font-size: 28px; letter-spacing: 12px; font-weight: 800;
+       margin: 0 0 6px; }
+  .sub { text-align: center; color: #8a93a8; font-size: 12px; margin: 0 0 24px; }
+  h2 { font-size: 15px; font-weight: 700; margin: 26px 0 8px; padding-left: 9px;
+       border-left: 4px solid #5b6cff; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 1px solid #aab1c2; padding: 9px 11px; vertical-align: top; }
+  .info th { background: #f3f5fb; width: 110px; text-align: left; font-weight: 700; color: #41496a; }
+  .grid thead th { background: #eef0f8; text-align: center; font-weight: 700; }
+  .grid td.idx { text-align: center; color: #6b748c; width: 40px; }
+  .grid td.who { width: 120px; }
+  .grid td.due { width: 110px; text-align: center; }
+  .box { border: 1px solid #c9cedb; min-height: 84px; padding: 11px; border-radius: 4px; }
+  .foot { margin-top: 30px; text-align: right; color: #8a93a8; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>회 의 록</h1>
+    <p class="sub">Meeting Minutes</p>
+
+    <table class="info">
+      <tr><th>회의명</th><td></td><th>일시</th><td></td></tr>
+      <tr><th>장소</th><td></td><th>작성자</th><td></td></tr>
+      <tr><th>참석자</th><td colspan="3"></td></tr>
+    </table>
+
+    <h2>안건 및 논의 내용</h2>
+    <table class="grid">
+      <thead>
+        <tr><th>No</th><th>안건</th><th>논의 내용</th><th>결정 사항</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="idx">1</td><td></td><td></td><td></td></tr>
+        <tr><td class="idx">2</td><td></td><td></td><td></td></tr>
+        <tr><td class="idx">3</td><td></td><td></td><td></td></tr>
+        <tr><td class="idx">4</td><td></td><td></td><td></td></tr>
+      </tbody>
+    </table>
+
+    <h2>결정 사항 요약</h2>
+    <div class="box"></div>
+
+    <h2>액션 아이템</h2>
+    <table class="grid">
+      <thead>
+        <tr><th>담당자</th><th>할 일</th><th>기한</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="who"></td><td></td><td class="due"></td></tr>
+        <tr><td class="who"></td><td></td><td class="due"></td></tr>
+        <tr><td class="who"></td><td></td><td class="due"></td></tr>
+      </tbody>
+    </table>
+
+    <h2>특이 사항 / 비고</h2>
+    <div class="box"></div>
+
+    <p class="foot">본 회의록은 작성자가 정리한 내용이며, 정정 사항은 차기 회의에서 반영합니다.</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>docloom · compose</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<style>
+  :root {
+    --bg:#f4f6fb; --bg2:#eef1f8;
+    --panel:#ffffff; --panel2:#f8f9fd; --line:#e3e7f0; --line2:#eceff5;
+    --fg:#1c2233; --muted:#6b748c; --soft:#8a93a8;
+    --accent:#5b6cff; --accent2:#8b5bff; --accentSoft:#eef0ff;
+    --ok:#16a34a; --okSoft:#e8f7ee; --err:#e11d48; --errSoft:#fdecef;
+    --radius:16px; --radius-sm:11px;
+    --shadow-sm:0 1px 3px rgba(20,28,60,.06), 0 1px 2px rgba(20,28,60,.04);
+    --shadow-md:0 8px 28px rgba(40,52,100,.10);
+    --shadow-lg:0 24px 60px rgba(40,52,100,.16);
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; overflow:hidden; }   /* 창 스크롤 원천 차단 — 스크롤은 stage 한 곳만 */
+  body {
+    margin:0; color:var(--fg);
+    font-family:-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;
+    -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(900px 480px at 88% -8%, #e7ebff 0%, transparent 60%),
+      radial-gradient(760px 420px at -8% 108%, #f0e8ff 0%, transparent 55%),
+      linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+    background-attachment:fixed;
+    overflow:hidden;            /* 창 스크롤 제거 — 스크롤은 미리보기 stage 한 곳만 */
+  }
+  /* 화면 전체를 뷰포트에 맞춰 세로로 채운다(header·strip 고정, 본문이 남는 높이). */
+  .wrap { max-width:1240px; margin:0 auto; padding:22px 22px 20px; height:100vh;
+    display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:18px; }
+  .logo { width:38px; height:38px; border-radius:11px; flex:none;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    box-shadow:0 8px 18px rgba(91,108,255,.3); }
+  header h1 { font-size:21px; margin:0; letter-spacing:-.3px; font-weight:750; }
+  header h1 .loom { color:var(--accent); }
+
+  /* ── 썸네일 스트립(미리보기 위) ── */
+  .strip { display:flex; gap:14px; align-items:flex-end; margin:6px 0 16px; }
+  .thumb { width:96px; cursor:pointer; border:0; background:none; padding:0; text-align:center; }
+  .thumb .card {
+    width:96px; height:124px; border-radius:10px; overflow:hidden; position:relative;
+    background:#fff; border:1px solid var(--line); box-shadow:var(--shadow-sm);
+    transition:transform .12s, box-shadow .12s, border-color .12s; }
+  .thumb:hover .card { transform:translateY(-3px); box-shadow:var(--shadow-md); }
+  .thumb.active .card { border-color:var(--accent); box-shadow:0 0 0 3px var(--accentSoft), var(--shadow-md); }
+  /* 문서 1페이지를 카드에 맞춰 가운데 정렬(JS 가 A4 폭 기준 scale 계산). */
+  .thumb .mini {
+    position:absolute; top:0; left:50%; width:794px; border:0; background:#fff;
+    transform-origin:top center; pointer-events:none; }
+  .thumb .label { margin-top:6px; font-size:11.5px; color:var(--muted);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .thumb.active .label { color:var(--accent); font-weight:700; }
+  .thumb.add .card { display:flex; align-items:center; justify-content:center;
+    border-style:dashed; background:var(--panel2); }
+  .thumb.add .plus { font-size:34px; color:var(--soft); font-weight:300; line-height:1;
+    width:40px; height:48px; border:2px solid var(--line); border-radius:6px;
+    display:flex; align-items:center; justify-content:center; }
+  .thumb.add:hover .plus { color:var(--accent); border-color:var(--accent); }
+
+  header, .strip { flex:none; }
+
+  /* ── 본문 2열 (남는 높이를 채움) ── */
+  .cols { display:grid; grid-template-columns:1fr 380px; gap:18px; align-items:stretch;
+    flex:1 1 auto; min-height:0; }
+
+  /* 맥 브라우저 셸 */
+  .browser { border-radius:var(--radius); overflow:hidden; background:#fff;
+    box-shadow:var(--shadow-lg); border:1px solid var(--line);
+    display:flex; flex-direction:column; min-height:0; }
+  .browser .bar { display:flex; align-items:center; gap:9px; padding:10px 13px; flex:none;
+    background:linear-gradient(180deg,#f7f8fb,#eef1f6); border-bottom:1px solid var(--line); }
+  .dots { display:flex; gap:7px; }
+  .dots i { width:12px; height:12px; border-radius:50%; display:block; }
+  .dots .r{ background:#ff5f57; } .dots .y{ background:#febc2e; } .dots .g{ background:#28c840; }
+  .addr { flex:1; height:26px; border-radius:8px; background:#fff; border:1px solid var(--line);
+    display:flex; align-items:center; gap:6px; padding:0 11px; font-size:12px; color:var(--soft);
+    overflow:hidden; white-space:nowrap; }
+  .addr .lock { color:var(--ok); font-size:11px; }
+  /* 무대: 데모와 동일 — iframe 이 영역을 꽉 채우고 미리보기는 그 안에서 스크롤(스크롤바 1개). */
+  .browser .stage { position:relative; width:100%; flex:1 1 auto; min-height:0;
+    background:#eceef4; overflow:hidden; }
+  .browser .stage #frame { width:100%; height:100%; border:0; background:#fff; display:block; }
+
+  /* 우측 패널 */
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow-md); padding:16px 16px 18px; align-self:stretch; min-height:0;
+    display:flex; flex-direction:column; gap:13px; }
+  /* 자료 입력 영역이 패널 높이를 채워 좌측 미리보기와 균형을 맞춘다. */
+  .field { display:flex; flex-direction:column; gap:5px; flex:1 1 auto; min-height:0; }
+  .field label { font-size:12px; font-weight:600; color:var(--muted); }
+  textarea {
+    width:100%; font:inherit; font-size:13px; color:var(--fg); background:var(--panel2);
+    border:1px solid var(--line); border-radius:var(--radius-sm); padding:10px 12px; outline:none;
+    resize:none; flex:1 1 auto; min-height:120px; line-height:1.6; }
+  textarea:focus { border-color:var(--accent); background:#fff; box-shadow:0 0 0 3px var(--accentSoft); }
+  .btn { font:inherit; font-weight:700; font-size:13.5px; border:0; border-radius:var(--radius-sm);
+    padding:12px 14px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:7px; }
+  .btn.primary { color:#fff; background:linear-gradient(135deg,var(--accent),var(--accent2));
+    box-shadow:0 8px 20px rgba(91,108,255,.28); }
+  .btn.primary:disabled { opacity:.5; cursor:not-allowed; box-shadow:none; }
+  .btn.ghost { background:var(--panel2); border:1px solid var(--line); color:var(--fg); }
+  .seg { display:flex; border:1px solid var(--line); border-radius:var(--radius-sm); overflow:hidden; }
+  .seg button { flex:1; border:0; background:#fff; font:inherit; font-size:12.5px; font-weight:600;
+    color:var(--muted); padding:8px; cursor:pointer; }
+  .seg button.on { background:var(--accentSoft); color:var(--accent); }
+  .status { font-size:12px; color:var(--muted); min-height:16px; }
+  .status.err { color:var(--err); }
+  .status.ok { color:var(--ok); }
+  .spinner { width:13px; height:13px; border:2px solid #fff; border-top-color:transparent;
+    border-radius:50%; display:inline-block; animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .divider { height:1px; background:var(--line2); margin:2px 0; }
+
+  /* 좁은 화면: 한 열로 쌓고 창 스크롤 허용(뷰포트 강제맞춤 해제). */
+  @media (max-width:980px){
+    html, body { overflow:auto; }
+    .wrap { height:auto; display:block; }
+    .cols { display:block; }
+    .browser { margin-bottom:16px; }
+    .browser .stage { height:70vh; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="logo" aria-hidden="true"></span>
+    <h1><span>doc</span><span class="loom">loom</span> · compose</h1>
+  </header>
+
+  <!-- 썸네일 스트립: 등록 샘플 양식 + ＋업로드 -->
+  <div class="strip" id="strip">
+    <button class="thumb active" id="sampleThumb" title="등록된 샘플 양식">
+      <div class="card"><iframe class="mini" id="sampleMini" tabindex="-1" scrolling="no" sandbox="allow-scripts allow-same-origin"></iframe></div>
+      <div class="label">샘플 양식</div>
+    </button>
+    <button class="thumb add" id="addThumb" title="내 문서 양식 업로드">
+      <div class="card"><span class="plus">＋</span></div>
+      <div class="label">양식 업로드</div>
+    </button>
+  </div>
+
+  <div class="cols">
+    <!-- 좌: 맥 브라우저 셸 미리보기 -->
+    <div class="browser">
+      <div class="bar">
+        <span class="dots"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+        <span class="addr"><span class="lock">🔒</span><span id="addr">docloom://preview/샘플 양식</span></span>
+      </div>
+      <div class="stage" id="stage"><iframe id="frame" sandbox="allow-scripts allow-same-origin"></iframe></div>
+    </div>
+
+    <!-- 우: 자료 입력 -->
+    <div class="panel">
+      <div class="field">
+        <label>자료</label>
+        <textarea id="material" placeholder="여기에 자료를 붙여넣으세요.&#10;&#10;예) 2026년 1분기 매출 12억, 전년 대비 18% 성장. 핵심 동인은 신규 구독 전환. 2분기 전망 14억."></textarea>
+      </div>
+      <button class="btn primary" id="run" disabled>✨ 반영</button>
+      <div class="status" id="status"></div>
+
+      <div class="divider"></div>
+      <div class="seg" id="viewSeg" style="display:none">
+        <button data-v="form" class="on">원본 양식</button>
+        <button data-v="result">반영본</button>
+      </div>
+      <button class="btn ghost" id="download" style="display:none">⬇ 결과 다운로드</button>
+    </div>
+  </div>
+</div>
+
+<!-- accept 제한 없음 — 어떤 파일이든 고를 수 있게 하고, 미지원이면 안내 메시지로 처리한다. -->
+<input type="file" id="file" style="display:none" />
+
+<script type="module">
+  // 미리보기는 **클라이언트에서 렌더**한다(데모와 동일) — 특히 HWP 는 rhwp(WASM)라야 한글이
+  // 안 깨진다(서버 코어 렌더는 mojibake). LLM 채움(/compose)만 서버를 경유한다.
+  import { previewHtml, formatFromFilename, hwpToTreePreviewHtml,
+           extractPdfModel, pdfModelToPreviewHtml } from "./docloom.mjs?v=20260609f";
+  import rhwpInit, { HwpDocument } from "./rhwp.js?v=20260609f";
+
+  const $ = (id) => document.getElementById(id);
+
+  // compose 채움만 서버(서버가 Ollama 호출). 배포 시 window.DOCLOOM_API 로 덮어씀(기본 :8080).
+  const API_BASE = (window.DOCLOOM_API || "http://localhost:8080").replace(/\/+$/, "");
+
+  const state = {
+    formBytes: null, formName: "샘플 양식",
+    formPreviewUrl: null, resultPreviewUrl: null,
+    resultBytes: null, view: "form",
+  };
+
+  // base64 ↔ bytes (대용량 안전, 청크 처리)
+  function bytesToB64(bytes) {
+    let bin = ""; const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    return btoa(bin);
+  }
+  function b64ToBytes(b64) {
+    const bin = atob(b64); const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  // rhwp WASM lazy 초기화(데모와 동일) — hwp/hwpx 열 때만. 텍스트 폭 측정 콜백 설치.
+  let rhwpReady = null;
+  function ensureRhwp() {
+    if (!rhwpReady) {
+      let ctx = null, lastFont = "";
+      globalThis.measureTextWidth = (font, text) => {
+        if (!ctx) ctx = document.createElement("canvas").getContext("2d");
+        if (font !== lastFont) { ctx.font = font; lastFont = font; }
+        return ctx.measureText(text || "").width;
+      };
+      rhwpReady = rhwpInit({ module_or_path: "./rhwp_bg.wasm?v=20260609c" });
+    }
+    return rhwpReady;
+  }
+
+  // 바이트 → 미리보기 HTML(클라이언트). hwp/hwpx 는 rhwp 흐름배치 렌더, 그 외는 코어 previewHtml.
+  async function clientPreview(bytes, name) {
+    const fmt = formatFromFilename(name);
+    if (fmt === "hwp" || fmt === "hwpx") {
+      await ensureRhwp();
+      const doc = new HwpDocument(bytes);
+      return hwpToTreePreviewHtml(doc, { title: name, rawBytes: bytes });
+    }
+    if (fmt === "pdf") {
+      // PDF 는 첫 페이지만이 아니라 여러 페이지를 렌더한다(표지가 이미지면 본문 텍스트가 안 보이므로).
+      // 대용량 대비 페이지 상한(렌더 비용). 텍스트 페이지는 한글 정상 추출.
+      const model = extractPdfModel(bytes, { maxPages: 30 });
+      return pdfModelToPreviewHtml(model);
+    }
+    return previewHtml(bytes, { title: name, format: fmt });
+  }
+
+  function blobUrl(html) { return URL.createObjectURL(new Blob([html], { type: "text/html" })); }
+  function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = "status " + kind; }
+
+  const A4W = 794; // 썸네일 축소 기준 폭
+
+  // 메인 미리보기: 데모와 동일하게 **자연 크기**로 보여주고 스크롤은 iframe 내부 한 곳만(축소 안 함).
+  function loadMain(url) { $("frame").src = url; }
+
+  // 썸네일: 카드(96px)에 맞춰 A4 폭 기준 축소(문서 상단).
+  function fitThumb(m) {
+    try {
+      m.style.height = "1040px";
+      m.style.transform = `translateX(-50%) scale(${m.parentElement.clientWidth / A4W})`;
+    } catch { /* same-origin 아닐 때 무시 */ }
+  }
+  function loadThumb(url) {
+    const m = $("sampleMini");
+    m.onload = () => { fitThumb(m); setTimeout(() => fitThumb(m), 250); };
+    m.src = url;
+  }
+
+  function showPreview(which) {
+    state.view = which;
+    const url = which === "result" ? state.resultPreviewUrl : state.formPreviewUrl;
+    if (url) loadMain(url);
+    $("addr").textContent = "docloom://preview/" + (which === "result" ? "반영본" : state.formName);
+    for (const b of $("viewSeg").querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === which);
+  }
+
+  async function loadForm(bytes, name) {
+    state.formBytes = bytes; state.formName = name;
+    if (state.formPreviewUrl) URL.revokeObjectURL(state.formPreviewUrl);
+    if (state.resultPreviewUrl) { URL.revokeObjectURL(state.resultPreviewUrl); state.resultPreviewUrl = null; }
+    state.resultBytes = null;
+    setStatus("미리보기 준비 중…");
+    try {
+      const html = await clientPreview(bytes, name);
+      state.formPreviewUrl = blobUrl(html);
+      loadThumb(state.formPreviewUrl);
+      $("viewSeg").style.display = "none";
+      $("download").style.display = "none";
+      showPreview("form");
+      setStatus("");
+    } catch (e) {
+      setStatus("미리보기 실패: " + (e?.message ?? e), "err");
+    }
+    updateRunEnabled();
+  }
+
+  function updateRunEnabled() {
+    $("run").disabled = !(state.formBytes && $("material").value.trim());
+  }
+
+  async function run() {
+    const material = $("material").value.trim();
+    if (!material || !state.formBytes) return;
+    $("run").disabled = true;
+    const orig = $("run").innerHTML; $("run").innerHTML = '<span class="spinner"></span> 반영 중…';
+    setStatus("");
+    try {
+      const res = await fetch(`${API_BASE}/compose`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ doc: bytesToB64(state.formBytes), material, name: state.formName }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const { doc } = await res.json();
+      state.resultBytes = b64ToBytes(doc);
+      if (state.resultPreviewUrl) URL.revokeObjectURL(state.resultPreviewUrl);
+      state.resultPreviewUrl = blobUrl(await clientPreview(state.resultBytes, state.formName));
+      $("viewSeg").style.display = "flex";
+      $("download").style.display = "inline-flex";
+      showPreview("result");
+      setStatus("반영 완료", "ok");
+    } catch (e) {
+      setStatus("반영 실패: " + (e?.message ?? e), "err");
+    } finally {
+      $("run").innerHTML = orig; updateRunEnabled();
+    }
+  }
+
+  function download() {
+    if (!state.resultBytes) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([state.resultBytes]));
+    const base = state.formName.replace(/\.[^.]+$/, ""), ext = state.formName.match(/\.[^.]+$/)?.[0] ?? "";
+    a.download = base + "-반영" + ext;
+    a.click();
+  }
+
+  $("addThumb").addEventListener("click", () => $("file").click());
+  $("file").addEventListener("change", async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    $("sampleThumb").classList.remove("active"); $("addThumb").classList.add("active");
+    $("sampleThumb").querySelector(".label").textContent = f.name;
+    await loadForm(bytes, f.name);
+  });
+  $("sampleThumb").addEventListener("click", () => loadSample());
+  $("material").addEventListener("input", updateRunEnabled);
+  $("run").addEventListener("click", run);
+  $("download").addEventListener("click", download);
+  for (const b of $("viewSeg").querySelectorAll("button")) b.addEventListener("click", () => showPreview(b.dataset.v));
+  window.addEventListener("resize", () => fitThumb($("sampleMini")));
+
+  async function loadSample() {
+    $("addThumb").classList.remove("active"); $("sampleThumb").classList.add("active");
+    $("sampleThumb").querySelector(".label").textContent = "샘플 양식";
+    try {
+      const res = await fetch("_samples/sample-form.html");
+      if (!res.ok) throw new Error("샘플을 불러올 수 없음");
+      await loadForm(new Uint8Array(await res.arrayBuffer()), "sample-form.html");
+      state.formName = "sample-form.html";
+    } catch (e) { setStatus("샘플 로드 실패: " + (e?.message ?? e), "err"); }
+  }
+
+  // 시작: 샘플 양식 미리보기(서버 경유)
+  loadSample();
+</script>
+</body>
+</html>
