@@ -10,6 +10,7 @@
  * ToUnicode 없는 CID 폰트는 글자를 복원할 수 없어 □ 로 표시한다.
  */
 import { PdfDocument, PdfLexer, PName, PStream, type PDict, type PdfValue } from "./pdfObjects.js";
+import { cidToUnicodeKorea1 } from "./cidUnicodeKorea1.js";
 import { embedFontFace } from "./pdfFontEmbed.js";
 
 /** 행렬 [a b c d e f] (PDF 텍스트/그래픽 공통). */
@@ -77,6 +78,9 @@ interface FontModel {
   italic: boolean;
   /** 임베디드 폰트 @font-face family(있으면). 없으면 대체폰트로 그린다. */
   embedFamily?: string;
+  /** Type0+Identity-H 이고 ToUnicode 가 없을 때, 자손폰트 CIDSystemInfo /Ordering.
+   *  "Korea1" 이면 표준 Adobe-Korea1 CID 가정하에 코드(=CID)→유니코드 복원. */
+  cidOrdering?: string;
 }
 
 const latin1 = new TextDecoder("latin1");
@@ -165,6 +169,7 @@ function buildFont(doc: PdfDocument, fontDict: PDict): FontModel {
 
   // FontDescriptor(단순=fontDict, Type0=자손폰트). 굵기/기울임 판별에 사용.
   let descriptor: PDict | undefined;
+  let cidOrdering: string | undefined;
   if (isType0) {
     const descs = doc.get(fontDict, "DescendantFonts");
     const desc = doc.getDict(Array.isArray(descs) ? descs[0] ?? null : descs);
@@ -173,6 +178,20 @@ function buildFont(doc: PdfDocument, fontDict: PDict): FontModel {
       const w = doc.get(desc, "W");
       if (Array.isArray(w)) parseCidWidths(doc, w, widths);
       descriptor = doc.getDict(doc.get(desc, "FontDescriptor"));
+      // ToUnicode 가 없고 Identity-H 인 CID 폰트만: CIDSystemInfo /Ordering 으로
+      // 표준 컬렉션 CID→유니코드 복원을 켠다(현재 Korea1 지원).
+      if (!toUnicode && /Identity-[HV]/.test(encName)) {
+        const csi = doc.getDict(doc.get(desc, "CIDSystemInfo"));
+        if (csi) {
+          const str = (v: unknown): string =>
+            typeof v === "string" ? v : v instanceof PName ? v.name : v instanceof Uint8Array ? latin1.decode(v) : "";
+          const ordName = str(doc.resolve(doc.get(csi, "Ordering")));
+          const regName = str(doc.resolve(doc.get(csi, "Registry")));
+          // 표준 Adobe-Korea1 컬렉션만(Registry=Adobe). 비표준 생성기가 Ordering 이름만
+          // 재사용한 경우의 오매핑을 막는다.
+          if (/Korea1/i.test(ordName) && /Adobe/i.test(regName)) cidOrdering = "Korea1";
+        }
+      }
     }
   } else {
     // 단순 폰트 /FirstChar + /Widths
@@ -202,9 +221,9 @@ function buildFont(doc: PdfDocument, fontDict: PDict): FontModel {
 
   // 임베디드 폰트 임베딩(단순/CID, TrueType/OpenType/CFF). 실패 시 대체폰트로 폴백.
   // 렌더가 내보내는 유니코드(codeToText)와 글리프를 잇도록 동일 매핑정보를 넘긴다.
-  const embedFamily = embedFontFace(doc, fontDict, { toUnicode, unicodeCodes, twoByte, widths, defaultWidth }) ?? undefined;
+  const embedFamily = embedFontFace(doc, fontDict, { toUnicode, unicodeCodes, twoByte, widths, defaultWidth, cidOrdering }) ?? undefined;
 
-  return { twoByte, toUnicode, unicodeCodes, widths, defaultWidth, bold, italic, embedFamily };
+  return { twoByte, toUnicode, unicodeCodes, widths, defaultWidth, bold, italic, embedFamily, cidOrdering };
 }
 
 /** CID /W 배열 파싱: "c [w…]" 또는 "cFirst cLast w". */
@@ -259,6 +278,11 @@ function codeToText(font: FontModel, code: number): string {
   }
   // UniKS-UCS2-H 등: 2바이트 코드가 곧 유니코드(ToUnicode 불필요).
   if (font.unicodeCodes) return code > 0 ? String.fromCharCode(code) : "";
+  // ToUnicode 없는 Identity-H CID 폰트라도 표준 Adobe-Korea1 컬렉션이면 코드(=CID)→유니코드 복원.
+  if (font.cidOrdering === "Korea1") {
+    const u = cidToUnicodeKorea1(code);
+    if (u !== undefined) return u > 0 ? remapSymbol(String.fromCodePoint(u)) : "";
+  }
   if (font.twoByte) return "�"; // ToUnicode 없는 CID(Identity 등) → 복원 불가
   if (code >= 0x20 && code !== 0x7f) return String.fromCharCode(code); // WinAnsi 근사
   return "";

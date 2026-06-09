@@ -12,6 +12,7 @@
  */
 
 import { PStream, PName, type PDict, type PdfDocument } from "./pdfObjects.js";
+import { cidToUnicodeKorea1 } from "./cidUnicodeKorea1.js";
 
 /** 폰트의 코드→유니코드/폭 등 — embedFontFace 가 글리프 매핑을 만드는 데 쓰는 정보. */
 export interface FontMapInfo {
@@ -20,6 +21,8 @@ export interface FontMapInfo {
   twoByte: boolean;
   widths: Map<number, number>;
   defaultWidth: number;
+  /** ToUnicode 없는 Identity-H CID 폰트의 CIDSystemInfo /Ordering("Korea1" 지원). */
+  cidOrdering?: string;
 }
 
 /** 빅엔디안 읽기 헬퍼. */
@@ -275,6 +278,11 @@ function makeCodeToUni(fm: FontMapInfo): (code: number) => string {
   return (code: number): string => {
     if (fm.toUnicode) { const s = fm.toUnicode.get(code); if (s !== undefined) return s; }
     if (fm.unicodeCodes) return code > 0 ? String.fromCharCode(code) : "";
+    // ToUnicode 없는 Korea1 Identity-H CID 폰트: 표준 CID→유니코드 로 글리프와 잇는다.
+    if (fm.cidOrdering === "Korea1") {
+      const u = cidToUnicodeKorea1(code);
+      if (u !== undefined) return u > 0 ? String.fromCodePoint(u) : "";
+    }
     if (fm.twoByte) return "";
     if (code >= 0x20 && code !== 0x7f) return String.fromCharCode(code);
     return "";

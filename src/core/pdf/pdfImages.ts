@@ -87,8 +87,13 @@ function colorSpace(doc: PdfDocument, csv: PdfValue): CsInfo {
   }
 }
 
-/** bpc 비트로 압축된 샘플을 픽셀당 8bit 컴포넌트 배열로 펼친다(bpc 1/2/4/8 지원). */
-function unpackSamples(data: Uint8Array, w: number, h: number, comps: number, bpc: number): Uint8Array {
+/**
+ * bpc 비트로 압축된 샘플을 픽셀당 8bit 배열로 펼친다(bpc 1/2/4/8 지원).
+ * raw=false(기본): 컬러 컴포넌트라 보고 0~255 로 스케일(예 4bit 15→255).
+ * raw=true: **Indexed 팔레트 인덱스** — 절대 스케일하지 말고 원값 유지(스케일하면 잘못된 팔레트
+ *           항목으로 매핑돼 색이 깨진다. 예: 인덱스 1→17→clamp(hival)→검정).
+ */
+function unpackSamples(data: Uint8Array, w: number, h: number, comps: number, bpc: number, raw = false): Uint8Array {
   if (bpc === 8) return data;
   const out = new Uint8Array(w * h * comps);
   const max = (1 << bpc) - 1;
@@ -102,7 +107,7 @@ function unpackSamples(data: Uint8Array, w: number, h: number, comps: number, bp
       const bytePos = rowOff + (bit >> 3);
       const shift = 8 - bpc - (bit & 7);
       let v = bytePos < data.length ? (data[bytePos]! >> shift) & max : 0;
-      out[oi++] = bpc === 8 ? v : Math.round((v * 255) / max);
+      out[oi++] = raw ? v : Math.round((v * 255) / max);
       bit += bpc;
     }
   }
@@ -414,7 +419,8 @@ export function buildImage(doc: PdfDocument, xobj: PStream, fill?: [number, numb
     const got = Math.floor(decoded.length / (w * h));
     if (!cs.indexed && got >= 1 && got <= 4 && got !== comps) comps = got;
   }
-  const samples = unpackSamples(decoded, w, h, comps, bpc);
+  // Indexed 는 팔레트 인덱스라 스케일 금지(raw). 그 외 컬러 컴포넌트는 0~255 로 정규화.
+  const samples = unpackSamples(decoded, w, h, comps, bpc, !!cs.indexed);
   const rgb = toRgb(samples, w, h, cs, comps);
   const alpha = loadAlpha(doc, dict, w, h);
   return { mime: "image/png", uri: `data:image/png;base64,${base64(encodePng(rgb, w, h, alpha))}`, w, h };
