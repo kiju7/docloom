@@ -534,6 +534,7 @@ interface TableRef { ci: number; rows: number; cols: number; cells: number }
 
 interface GridCell {
   row: number; col: number; rowSpan: number; colSpan: number; props: any; html: string; bg?: string;
+  h?: number; // 셀 bbox 높이(px) — 행 높이(min-height) 복원용
 }
 
 /**
@@ -1036,6 +1037,7 @@ interface TreeCtx {
   bgLayers: string[];          // 페이지 대부분 덮는 그림(테두리/워터마크) → 절대배치 배경으로 올림
   skipImage?: TNode;           // 쪽배경 페이지에서 배경 그림 노드(절대배치로 따로 그림)를 흐름에서 제외
   linePitch?: Map<TNode, number>; // TextLine → 다음 줄까지의 세로간격(빈 줄 높이 보정용, 표지 간격 보존)
+  imgSeen: { src: string; x: number; y: number }[]; // 렌더한 이미지(중복 스킵용) — rhwp stepping 중복 아티팩트 대응
 }
 
 /**
@@ -1045,6 +1047,22 @@ interface TreeCtx {
  * <img> 위치(left/top)를 트리 Image 노드 bbox 와 맞추면 각 노드의 **정답 바이트**를 얻는다.
  */
 function buildPageImages(doc: RhwpDoc, pg: number): PageImg[] {
+  // 1순위: getPageControlLayout 의 image 컨트롤 → getControlImageData(**컨트롤별 정확 바이트**, bbox 동봉).
+  //   renderPageHtml 이 그림을 0개 내는 복잡 레이아웃 페이지에서도, BinData 이름순 풀(순서 어긋남)을
+  //   거치지 않고 컨트롤 좌표에 맞는 정답 바이트를 얻는다(이미지 순서/추출 문제 해결).
+  if (doc.getPageControlLayout && doc.getControlImageData) {
+    const cl = pj<{ controls?: any[] }>(safe(() => doc.getPageControlLayout!(pg)));
+    const out: PageImg[] = [];
+    for (const c of (cl?.controls ?? [])) {
+      if (c?.type !== "image" || typeof c.x !== "number" || typeof c.y !== "number") continue;
+      const data = safe(() => doc.getControlImageData!(c.secIdx, c.paraIdx, c.controlIdx));
+      if (!data || !data.length) continue;
+      const mime = (doc.getControlImageMime && safe(() => doc.getControlImageMime!(c.secIdx, c.paraIdx, c.controlIdx))) || "image/png";
+      out.push({ x: c.x, y: c.y, src: `data:${mime};base64,${bytesToBase64(data)}`, used: false });
+    }
+    if (out.length) return out;
+  }
+  // 2순위(폴백): renderPageHtml 의 <img>(rhwp 가 binItemID 로 임베드한 것).
   const html = doc.renderPageHtml ? safe(() => doc.renderPageHtml!(pg)) : undefined;
   if (!html) return [];
   const out: PageImg[] = [];
@@ -1136,6 +1154,101 @@ function buildCellBgs(doc: RhwpDoc, pg: number): CellBg[] {
     out.push({ x, y, color });
   }
   return out;
+}
+
+/** line/path op → 수평·수직 구분선 div(대각선/곡선은 생략). 색 없으면 null.
+ *  layer tree op 는 strokeColor/width 를 갖는다(렌더트리의 Line/Rect 는 색이 없어 버려진다). */
+/** 부유(floating) 글상자·도형 — getPageControlLayout 의 shape 위치에, layer tree 의 테두리(rectangle)와
+ *  글자(textRun)를 절대배치 오버레이로 렌더. rhwp 렌더트리(흐름)는 부유 개체를 빠뜨려서 이 오버레이로 보강.
+ *  본문 흐름과 겹치지 않게 **shape bbox 안의 op 만** 가져온다. */
+function renderShapeOverlays(doc: RhwpDoc, pg: number): string {
+  if (!doc.getPageControlLayout || !doc.getPageLayerTree) return "";
+  const cl = pj<{ controls?: any[] }>(safe(() => doc.getPageControlLayout!(pg)));
+  const shapes = (cl?.controls ?? []).filter((c) => c?.type === "shape" && typeof c.x === "number" && typeof c.w === "number");
+  if (!shapes.length) return "";
+  const lt = pj<{ root?: unknown }>(safe(() => doc.getPageLayerTree!(pg)));
+  if (!lt || !lt.root) return "";
+  const texts: any[] = [], rects: any[] = [];
+  const kids = (n: any) => [...(n.children ?? []), ...(n.child ? [n.child] : [])];
+  (function walk(n: any) {
+    if (!n || typeof n !== "object") return;
+    for (const op of (n.ops ?? [])) {
+      if (op.type === "textRun" && op.bbox && op.text) texts.push(op);
+      else if (op.type === "rectangle" && op.bbox) rects.push(op);
+    }
+    for (const c of kids(n)) walk(c);
+  })((lt as { root: unknown }).root);
+  const inBox = (b: any, s: any) => b && b.x >= s.x - 4 && b.x <= s.x + s.w + 4 && b.y >= s.y - 4 && b.y <= s.y + s.h + 4;
+  let html = "";
+  for (const s of shapes) {
+    const rect = rects.find((r) => Math.abs(r.bbox.x - s.x) < 4 && Math.abs(r.bbox.y - s.y) < 4 && Math.abs(r.bbox.width - s.w) < 6);
+    const sc = rect?.style?.strokeColor, sw = rect?.style?.strokeWidth ?? 0;
+    const border = sc && sc !== "#ffffff" && sw > 0 ? `border:${Math.max(1, Math.round(sw * 0.75))}px solid ${sc};` : "";
+    const fc = rect?.style?.fillColor;
+    const fill = fc && fc !== "#ffffff" ? `background:${fc};` : "";
+    const inner = texts.filter((t) => inBox(t.bbox, s)).map((t) => {
+      const ps = t.paintStyle ?? {};
+      const css = [
+        `left:${(t.bbox.x - s.x).toFixed(1)}px`, `top:${(t.bbox.y - s.y).toFixed(1)}px`,
+        typeof ps.fontSize === "number" ? `font-size:${(ps.fontSize * 0.75).toFixed(1)}pt` : "",
+        ps.bold ? "font-weight:700" : "", ps.italic ? "font-style:italic" : "",
+        ps.color && ps.color !== "#000000" ? `color:${ps.color}` : "",
+        ps.fontFamily ? `font-family:${fontStack(ps.fontFamily)}` : "",
+      ].filter(Boolean).join(";");
+      return `<span style="position:absolute;white-space:nowrap;${css}">${esc(t.text)}</span>`;
+    }).join("");
+    if (!border && !fill && !inner) continue;
+    html += `<div class="hp-shape" style="left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${Math.round(s.w)}px;height:${Math.round(s.h)}px;${border}${fill}">${inner}</div>`;
+  }
+  return html;
+}
+
+function decorLineHtml(op: { type?: string; x1?: number; y1?: number; x2?: number; y2?: number;
+  style?: { color?: string; width?: number; strokeColor?: string; strokeWidth?: number };
+  connectorEndpoints?: { x1: number; y1: number; x2: number; y2: number } },
+  anchorBottom: boolean, pageH: number): string | null {
+  let x1: number | undefined, y1: number | undefined, x2: number | undefined, y2: number | undefined;
+  let color: string | undefined, width: number;
+  if (op.type === "line") {
+    ({ x1, y1, x2, y2 } = op); color = op.style?.color; width = op.style?.width ?? 0.5;
+  } else if (op.type === "path" && op.connectorEndpoints) {
+    ({ x1, y1, x2, y2 } = op.connectorEndpoints); color = op.style?.strokeColor; width = op.style?.strokeWidth ?? 1;
+  } else return null;
+  if (!color || color === "#ffffff" || ![x1, y1, x2, y2].every((v) => typeof v === "number" && isFinite(v))) return null;
+  const w = Math.abs(x2! - x1!), h = Math.abs(y2! - y1!);
+  const thick = Math.max(0.5, width);
+  const topY = Math.min(y1!, y2!);
+  // 꼬리말 선은 bottom 앵커(본문이 길어도 항상 페이지 하단). 머리말 선은 top 앵커.
+  const vert = w >= h
+    ? anchorBottom ? `bottom:${(pageH - topY - thick / 2).toFixed(1)}px` : `top:${(topY - thick / 2).toFixed(1)}px`
+    : anchorBottom ? `bottom:${(pageH - Math.max(y1!, y2!)).toFixed(1)}px` : `top:${Math.round(topY)}px`;
+  if (w >= h) // 수평선
+    return `<div class="hp-hr" style="left:${Math.round(Math.min(x1!, x2!))}px;${vert};width:${Math.round(w)}px;height:${thick.toFixed(1)}px;background:${color}"></div>`;
+  return `<div class="hp-hr" style="left:${(Math.min(x1!, x2!) - thick / 2).toFixed(1)}px;${vert};width:${thick.toFixed(1)}px;height:${Math.round(h)}px;background:${color}"></div>`;
+}
+
+/** 머리말/꼬리말 구분선 + 꼬리말 영역 상단 y. layer tree 의 header/footer 그룹 내 line·path stroke op 를
+ *  절대배치 div 로(본문 표 그리드선 중복을 피하려 머리말/꼬리말 그룹으로 한정). 꼬리말 선은 bottom 앵커.
+ *  footTop = 꼬리말 그룹 내 최상단 op y(페이지 하단 여백 reserve 계산용; 없으면 Infinity). */
+function hfSeparatorLinesHtml(doc: RhwpDoc, pg: number, pageH: number): { html: string; footTop: number } {
+  if (!doc.getPageLayerTree) return { html: "", footTop: Infinity };
+  const lt = pj<{ root?: unknown }>(safe(() => doc.getPageLayerTree!(pg)));
+  if (!lt || !lt.root) return { html: "", footTop: Infinity };
+  const out: string[] = [];
+  let footTop = Infinity;
+  const visit = (n: any, area: "" | "header" | "footer"): void => {
+    if (!n || typeof n !== "object") return;
+    const k = n.groupKind?.kind;
+    const a = k === "header" || k === "footer" ? k : area;
+    for (const op of (n.ops ?? [])) {
+      if (a === "footer" && typeof op.bbox?.y === "number") footTop = Math.min(footTop, op.bbox.y);
+      if (a) { const s = decorLineHtml(op, a === "footer", pageH); if (s) out.push(s); }
+    }
+    for (const c of (n.children ?? [])) visit(c, a);
+    if (n.child) visit(n.child, a);
+  };
+  visit((lt as { root: unknown }).root, "");
+  return { html: out.join(""), footTop };
 }
 
 /** 셀 bbox 좌상단에 가장 가까운(3px 내) 배경색. */
@@ -1243,6 +1356,11 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
       const uri = imageSrcFor(node, ctx); // 위치(bbox) 매칭 → 정답 바이트(폴백: 풀)
       if (!uri) return "";
       const b = node.bbox;
+      // rhwp 가 같은 그림을 stepping 좌표로 여러 번 노출하는 아티팩트 → 근접(100px)·동일 src 중복은 한 번만.
+      if (b && uri !== TRANSPARENT_PX) {
+        if (ctx.imgSeen.some((s) => s.src === uri && Math.abs(s.x - b.x) < 100 && Math.abs(s.y - b.y) < 100)) return "";
+        ctx.imgSeen.push({ src: uri, x: b.x, y: b.y });
+      }
       // (쪽배경 그림이 있는 페이지는 renderAbsBgPage 가 따로 처리 → 여기 안 옴.)
       const dim = b && b.w > 0 && b.h > 0 ? `width:${Math.round(b.w)}px;height:${Math.round(b.h)}px;` : "";
       return `<div class="hp-img"><img alt="" style="${dim}max-width:100%" src="${uri}"></div>`;
@@ -1278,6 +1396,10 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
             const uri = imageSrcFor(c, ctx);
             if (!uri) return "";
             const b = c.bbox;
+            if (b && uri !== TRANSPARENT_PX) {
+              if (ctx.imgSeen.some((s) => s.src === uri && Math.abs(s.x - b.x) < 100 && Math.abs(s.y - b.y) < 100)) return "";
+              ctx.imgSeen.push({ src: uri, x: b.x, y: b.y });
+            }
             const dim = b && b.w > 0 && b.h > 0 ? `width:${Math.round(b.w)}px;height:${Math.round(b.h)}px;` : "";
             return `<img alt="" style="${dim}max-width:100%;vertical-align:top" src="${uri}">`;
           }
@@ -1312,14 +1434,50 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
       return renderHeaderFooter(node, ctx);
     case "PageBg": case "Rect": case "Line":
       return ""; // 장식(배경/셀선) — 색은 셀 스타일에서 따로 취득
-    default:
+    default: {
       // Page, Body, Column, Group, Cell 등 → 자식 이어붙임
-      return (node.children ?? []).map((c) => renderTreeNode(c, ctx, inCell, cont)).join("");
+      const kids = node.children ?? [];
+      // 다단(多段): Body 밑 Column 이 2개 이상이고 x 가 다르면, 같은 y-밴드의 좁은 단들은 flex 로 좌우 병렬,
+      // 전체폭 단(제목/초록)은 흐름 블록으로 — y 순으로 쌓아 흐름배치(절대배치 X → 길어져도 겹치지 않음).
+      const colKids = kids.filter((k) => k.type === "Column" && k.bbox);
+      if (!inCell && colKids.length >= 2 && new Set(colKids.map((k) => Math.round(k.bbox!.x))).size >= 2) {
+        const rest = kids.filter((k) => k.type !== "Column").map((c) => renderTreeNode(c, ctx, inCell, cont)).join("");
+        const colHtml = (col: TNode) =>
+          (col.children ?? []).map((c) => renderTreeNode(c, ctx, false, { x: col.bbox!.x, w: col.bbox!.w })).join("");
+        // y 가 비슷한(같은 밴드) 단끼리 묶는다.
+        const sorted = [...colKids].sort((a, b) => (a.bbox!.y - b.bbox!.y) || (a.bbox!.x - b.bbox!.x));
+        const bands: TNode[][] = [];
+        for (const col of sorted) {
+          const last = bands[bands.length - 1];
+          if (last && Math.abs(last[0]!.bbox!.y - col.bbox!.y) < 8) last.push(col);
+          else bands.push([col]);
+        }
+        const bandsHtml = bands.map((band) => {
+          if (band.length === 1) return `<div class="hp-band">${colHtml(band[0]!)}</div>`;
+          const ordered = band.sort((a, b) => a.bbox!.x - b.bbox!.x);
+          const cells = ordered.map((col, i) => {
+            const next = ordered[i + 1];
+            const gap = next ? Math.max(0, Math.round(next.bbox!.x - (col.bbox!.x + col.bbox!.w))) : 0;
+            const mr = gap ? `;margin-right:${gap}px` : "";
+            return `<div class="hp-colcell" style="width:${Math.round(col.bbox!.w)}px${mr}">${colHtml(col)}</div>`;
+          }).join("");
+          return `<div class="hp-cols">${cells}</div>`;
+        }).join("");
+        return rest + bandsHtml;
+      }
+      return kids.map((c) => renderTreeNode(c, ctx, inCell, cont)).join("");
+    }
   }
 }
 
-/** 머리말/꼬리말 안 글줄을 실제 좌표(글자 x, 줄 y)로 절대배치한 div 들로. 쪽번호는 가운데 등 원본대로. */
+/** 머리말/꼬리말 안 글줄을 실제 좌표(글자 x, 줄 y)로 절대배치한 div 들로. 쪽번호는 가운데 등 원본대로.
+ *  꼬리말은 **bottom 앵커**(페이지 하단 기준) — 본문이 길어 페이지가 커져도 항상 본문 아래에 오게 한다.
+ *  머리말은 top 앵커(페이지 상단 고정). */
 function renderHeaderFooter(node: TNode, ctx: TreeCtx): string {
+  const isFooter = node.type === "Footer";
+  // bbox(top,height) → 절대배치 style(꼬리말은 bottom 기준으로 환산).
+  const anchor = (y: number, h: number): string =>
+    isFooter ? `bottom:${Math.round(ctx.pageH - y - h)}px` : `top:${Math.round(y)}px`;
   const out: string[] = [];
   (function walk(n: TNode) {
     if (!n || typeof n !== "object") return;
@@ -1332,14 +1490,14 @@ function renderHeaderFooter(node: TNode, ctx: TreeCtx): string {
           const t = esc(r.text ?? "");
           return st ? `<span style="${st}">${t}</span>` : t;
         }).join("");
-        out.push(`<div class="hp-hf" style="left:${Math.round(minX)}px;top:${Math.round(n.bbox.y)}px">${inner}</div>`);
+        out.push(`<div class="hp-hf" style="left:${Math.round(minX)}px;${anchor(n.bbox.y, n.bbox.h)}">${inner}</div>`);
       }
       return;
     }
     if (n.type === "Image" && n.bbox) {
       const uri = imageSrcFor(n, ctx);
       if (uri) {
-        out.push(`<img class="hp-hf" alt="" style="left:${Math.round(n.bbox.x)}px;top:${Math.round(n.bbox.y)}px;` +
+        out.push(`<img class="hp-hf" alt="" style="left:${Math.round(n.bbox.x)}px;${anchor(n.bbox.y, n.bbox.h)};` +
           `width:${Math.round(n.bbox.w)}px;height:${Math.round(n.bbox.h)}px" src="${uri}">`);
       }
       return;
@@ -1389,6 +1547,7 @@ function renderTreeTable(node: TNode, ctx: TreeCtx, topLevel: boolean): string {
       props: m?.props ?? null,
       bg: cellBgFor(cell.bbox, ctx), // renderPageHtml 에서 추출한 셀 배경색(중첩표 헤더 등)
       html: inner || "<br>",
+      h: cell.bbox?.h, // 원본 셀 높이(행 높이 복원용)
     };
   });
   return assembleTreeTable(grid, cols, topLevel);
@@ -1412,7 +1571,11 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
   }
   let trs = "";
   for (const r of [...byRow.keys()].sort((a, b) => a - b)) {
-    const tds = byRow.get(r)!
+    const rowCells = byRow.get(r)!;
+    // 행 높이 = 그 행에서 시작하는 비-rowspan 셀들의 원본 bbox 높이 최댓값(원본 행높이 복원).
+    // min-height 성격이라 내용이 더 길면 td 가 늘어난다(잘림 없음). rowspan 셀은 여러 행에 걸쳐 제외.
+    const rowH = Math.max(0, ...rowCells.filter((c) => c.rowSpan === 1 && typeof c.h === "number").map((c) => c.h!));
+    const tds = rowCells
       .sort((a, b) => a.col - b.col)
       .map((c) => {
         const span = (c.colSpan > 1 ? ` colspan="${c.colSpan}"` : "") + (c.rowSpan > 1 ? ` rowspan="${c.rowSpan}"` : "");
@@ -1423,7 +1586,8 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
         return `<td${span} style="${css}">${c.html}</td>`;
       })
       .join("");
-    trs += `<tr>${tds}</tr>\n`;
+    const trStyle = rowH > 0 ? ` style="height:${Math.round(rowH)}px"` : "";
+    trs += `<tr${trStyle}>${tds}</tr>\n`;
   }
   const cls = topLevel ? "hp-tbl" : "hp-tbl hp-nested";
   const widthStyle = totalW > 0 ? ` style="width:${totalW}px"` : "";
@@ -1545,27 +1709,34 @@ export function hwpToTreePreviewHtml(
   const pool = opts.rawBytes ? extractHwpBinImages(opts.rawBytes) : [];
   const cur = { i: 0 };
   const pages: string[] = [];
+  let footZoneTop = Infinity; // 모든 페이지 통틀어 꼬리말 영역 최상단 y(하단 여백 reserve 계산용)
   for (let pg = 0; pg < n; pg++) {
     const tree = pj<TNode>(safe(() => doc.getPageRenderTree!(pg)));
     if (!tree) continue;
     const ctx: TreeCtx = {
       doc, styles: buildRunStyles(doc, pg), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
-      linePitch: buildLinePitch(tree),
+      linePitch: buildLinePitch(tree), imgSeen: [],
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);
-    pages.push(bg ? renderBgPageFlow(tree, bg, ctx) : `<div class="hp-page">${renderTreeNode(tree, ctx, false, bodyCont)}</div>`);
+    const hf = hfSeparatorLinesHtml(doc, pg, pageH);
+    if (isFinite(hf.footTop)) footZoneTop = Math.min(footZoneTop, hf.footTop);
+    const shapes = renderShapeOverlays(doc, pg);
+    pages.push(bg ? renderBgPageFlow(tree, bg, ctx) : `<div class="hp-page">${renderTreeNode(tree, ctx, false, bodyCont)}${hf.html}${shapes}</div>`);
   }
   // 트리 미지원/실패 → 기존 흐름배치 미리보기로 폴백(안전망).
   if (pages.length === 0) return hwpToRichPreviewHtml(doc, opts);
 
   const title = esc(opts.title ?? "한글 미리보기");
+  // 꼬리말 영역만큼 페이지 하단에 여백을 확보 → 본문(흐름)이 길어져도 bottom 앵커 꼬리말과 겹치지 않는다.
+  const footReserve = isFinite(footZoneTop) ? Math.max(0, Math.ceil(pageH - footZoneTop) + 4) : 0;
+  const padBottom = footReserve ? `;padding-bottom:${footReserve}px` : "";
   return `<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
 <style>
   body{margin:0;background:#eceef0;padding:24px 0;font-family:'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#111}
   /* 각 페이지는 원본 용지(A4 등) 비율로: 폭 고정 + 용지 높이만큼 min-height(짧은 페이지도 종이처럼). */
-  .hp-page{position:relative;width:${pageW}px;min-height:${pageH}px;max-width:96%;margin:0 auto 22px;background:#fff;padding:${pad};
+  .hp-page{position:relative;width:${pageW}px;min-height:${pageH}px;max-width:96%;margin:0 auto 22px;background:#fff;padding:${pad}${padBottom};
     box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.10);line-height:1.5;font-size:10.5pt;box-sizing:border-box}
   /* 쪽배경(상장 테두리) 페이지: 그림은 글 뒤(절대), 본문은 실제 내용영역에서 세로 가운데. */
   .hp-bgpage{padding:0;display:flex;flex-direction:column;justify-content:center}
@@ -1578,6 +1749,13 @@ export function hwpToTreePreviewHtml(
   .hp-ln{min-height:1em;white-space:pre}
   /* 머리말/꼬리말(쪽번호 등)은 페이지 상/하단 실제 좌표에 고정(흐름과 무관). */
   .hp-hf{position:absolute;z-index:2;white-space:nowrap}
+  /* 머리말/꼬리말 구분선(layer tree line·path op) — 절대좌표. */
+  .hp-hr{position:absolute;z-index:1;pointer-events:none}
+  /* 다단(多段): 전체폭 밴드(흐름) + 좁은 단 묶음(flex 좌우 병렬). y 순으로 흐름배치 → 겹침 없음. */
+  .hp-cols{display:flex;align-items:flex-start}
+  .hp-colcell{overflow-wrap:anywhere}
+  /* 부유 글상자/도형 — bbox 절대좌표 오버레이(테두리+글자). */
+  .hp-shape{position:absolute;z-index:2;box-sizing:border-box;overflow:visible}
   /* 이미지는 inline-block 으로 — 같은 줄에 들어가면 옆으로, 넘치면 아래로(원본의 가로/세로 배치 근사). */
   .hp-img{display:inline-block;vertical-align:top;margin:4px 6px 4px 0}
   .hp-img img{display:block}
