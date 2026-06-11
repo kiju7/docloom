@@ -1125,6 +1125,7 @@ function buildPageImages(doc: RhwpDoc, pg: number): PageImg[] {
       if (c?.type !== "image" || typeof c.x !== "number" || typeof c.y !== "number") continue;
       const data = safe(() => doc.getControlImageData!(c.secIdx, c.paraIdx, c.controlIdx));
       if (!data || !data.length) continue;
+      if (data.length > MAX_IMG_BYTES) { out.push({ x: c.x, y: c.y, src: TRANSPARENT_PX, used: false }); continue; } // 과대 이미지 → 자리표시자
       const mime = (doc.getControlImageMime && safe(() => doc.getControlImageMime!(c.secIdx, c.paraIdx, c.controlIdx))) || "image/png";
       out.push({ x: c.x, y: c.y, src: `data:${mime};base64,${bytesToBase64(data)}`, used: false });
     }
@@ -1170,6 +1171,11 @@ function buildLinePitch(tree: TNode): Map<TNode, number> {
 const TRANSPARENT_PX =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
+/** 미리보기 1장당 임베드 이미지 상한(원본 바이트). 초과(예: 수십~수백MB 스캔이미지)는 base64 로
+ *  통째 박으면 출력 HTML 이 V8 문자열/메모리 한계를 넘겨 렌더가 죽는다 → 자리표시자로 대체. */
+const MAX_IMG_BYTES = 8_000_000;
+const MAX_IMG_B64 = Math.ceil(MAX_IMG_BYTES / 3) * 4 + 64;
+
 /**
  * 트리 Image 노드 → 표시할 src. 우선순위:
  *   ① bbox 로 renderPageHtml 의 <img>(정답 바이트) 매칭
@@ -1189,13 +1195,13 @@ function imageSrcFor(node: TNode, ctx: TreeCtx): string {
       const d = Math.abs(im.x - b.x) + Math.abs(im.y - b.y);
       if (d < bestD) { bestD = d; best = i; }
     }
-    if (best >= 0) { ctx.pageImgs[best]!.used = true; return ctx.pageImgs[best]!.src; }
+    if (best >= 0) { ctx.pageImgs[best]!.used = true; const s = ctx.pageImgs[best]!.src; return s.length > MAX_IMG_B64 ? TRANSPARENT_PX : s; }
   }
   // renderPageHtml 이 이 페이지에 <img> 를 0개 낸 경우에만 BinData 풀로 보충(미지원/실패 폴백).
   // (일부라도 낸 페이지의 미매칭 노드는 빈 그림틀이므로 풀에서 빌리지 않는다.)
   if (ctx.pageImgs.length === 0) {
     const uri = ctx.pool[ctx.cur.i];
-    if (uri !== undefined) { ctx.cur.i++; return uri; }
+    if (uri !== undefined) { ctx.cur.i++; return uri.length > MAX_IMG_B64 ? TRANSPARENT_PX : uri; }
   }
   return TRANSPARENT_PX; // 바이트 없음 → 투명 자리표시자(노드 드롭 방지)
 }
