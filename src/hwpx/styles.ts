@@ -18,6 +18,8 @@ export interface CharPr {
   underline: boolean;
   strike: boolean;
   font?: string;
+  super?: boolean; // 위첨자(<hh:supscript/>) — rhwp 가 노출 안 함
+  sub?: boolean;   // 아래첨자(<hh:subscript/>)
 }
 export interface Border {
   width: number; // px (0 = 없음)
@@ -93,6 +95,8 @@ export function parseHwpxStyles(headerXml: string | undefined): HwpxStyles {
       underline: !!underline && (attrOf(underline, "type") ?? "BOTTOM").toUpperCase() !== "NONE",
       strike: !!strikeout && (attrOf(strikeout, "shape") ?? "SOLID").toUpperCase() !== "NONE",
       font: fontRef ? attrOf(fontRef, "hangul") : undefined,
+      super: !!childLocal(cp, "supscript"),
+      sub: !!childLocal(cp, "subscript"),
     });
   }
 

@@ -50,19 +50,22 @@ function buildHwpxHfLines(rawBytes?: Uint8Array): { header?: { color: string; w:
   return out;
 }
 
-/** hwpx(zip) rawBytes → borderFillId → CSS background(그라데이션 포함). rhwp 가 그라데이션 채움을
- *  흰색으로 떨구는 것을 raw OWPML 로 보강한다(예: 제목막대의 파란 그라데이션 띠). hwp(CFB)면 빈 맵. */
-function buildHwpxFills(rawBytes?: Uint8Array): Map<number, string> {
-  const map = new Map<number, string>();
-  if (!rawBytes || rawBytes.length < 4 || rawBytes[0] !== 0x50 || rawBytes[1] !== 0x4b) return map; // PK(zip)?
+/** hwpx(zip) rawBytes → raw OWPML 보강 데이터. rhwp 가 떨구는 것들을 header.xml 로 복원:
+ *  - fills: borderFillId → CSS background(그라데이션 포함; 제목막대 파란 띠 등)
+ *  - sup/sub: 위/아래첨자 charPr id 집합(<hh:supscript/> 등 — rhwp 가 노출 안 함). hwp(CFB)면 빈 값. */
+function buildHwpxStyleAux(rawBytes?: Uint8Array): { fills: Map<number, string>; sup: Set<number>; sub: Set<number> } {
+  const fills = new Map<number, string>();
+  const sup = new Set<number>(), sub = new Set<number>();
+  if (!rawBytes || rawBytes.length < 4 || rawBytes[0] !== 0x50 || rawBytes[1] !== 0x4b) return { fills, sup, sub }; // PK(zip)?
   try {
     const files = readZip(rawBytes);
     const key = Object.keys(files).find((k) => /(^|\/)header\.xml$/i.test(k));
-    if (!key) return map;
-    const { borderFill } = parseHwpxStyles(new TextDecoder().decode(files[key]!));
-    for (const [id, bf] of borderFill) if (bf.bgCss) map.set(Number(id), bf.bgCss);
-  } catch { /* hwpx 아님/파싱 실패 → 빈 맵 */ }
-  return map;
+    if (!key) return { fills, sup, sub };
+    const { borderFill, charPr } = parseHwpxStyles(new TextDecoder().decode(files[key]!));
+    for (const [id, bf] of borderFill) if (bf.bgCss) fills.set(Number(id), bf.bgCss);
+    for (const [id, cp] of charPr) { if (cp.super) sup.add(Number(id)); if (cp.sub) sub.add(Number(id)); }
+  } catch { /* hwpx 아님/파싱 실패 */ }
+  return { fills, sup, sub };
 }
 
 /** rhwp `HwpDocument` 에서 이 모듈이 쓰는 메서드만 추린 구조적 타입. */
@@ -1284,13 +1287,14 @@ function hfSeparatorLinesHtml(doc: RhwpDoc, pg: number, pageH: number): { html: 
   if (!lt || !lt.root) return { html: "", footTop: Infinity };
   const out: string[] = [];
   let footTop = Infinity;
-  const visit = (n: any, area: "" | "header" | "footer"): void => {
+  // footnoteArea = 각주 구분선/글자 그룹(본문 하단). 구분선만 bottom 앵커로 렌더(글자는 흐름이 따로 냄).
+  const visit = (n: any, area: "" | "header" | "footer" | "footnote"): void => {
     if (!n || typeof n !== "object") return;
     const k = n.groupKind?.kind;
-    const a = k === "header" || k === "footer" ? k : area;
+    const a = k === "header" || k === "footer" ? k : k === "footnoteArea" ? "footnote" : area;
     for (const op of (n.ops ?? [])) {
       if (a === "footer" && typeof op.bbox?.y === "number") footTop = Math.min(footTop, op.bbox.y);
-      if (a) { const s = decorLineHtml(op, a === "footer", pageH); if (s) out.push(s); }
+      if (a) { const s = decorLineHtml(op, a === "footer" || a === "footnote", pageH); if (s) out.push(s); }
     }
     for (const c of (n.children ?? [])) visit(c, a);
     if (n.child) visit(n.child, a);
@@ -1371,12 +1375,19 @@ function runCss(r: any): string {
 }
 
 /** 페이지 텍스트 런 스타일 인덱스(bbox 키 → CSS). 트리 TextRun 의 bbox 로 조회. */
-function buildRunStyles(doc: RhwpDoc, pg: number): Map<string, string> {
+function buildRunStyles(doc: RhwpDoc, pg: number, sup?: Set<number>, sub?: Set<number>): Map<string, string> {
   const m = new Map<string, string>();
   const tl = doc.getPageTextLayout ? pj<any>(safe(() => doc.getPageTextLayout!(pg))) : null;
   for (const r of (tl?.runs ?? [])) {
     if (typeof r?.x !== "number" || typeof r?.y !== "number") continue;
-    m.set(`${r.x.toFixed(1)},${r.y.toFixed(1)}`, runCss(r));
+    let css = runCss(r);
+    // 위/아래첨자(rhwp 미노출) — raw OWPML charPr 의 supscript/subscript 를 charShapeId 로 매칭해 적용.
+    const id = r.charShapeId;
+    if (typeof id === "number") {
+      if (sup?.has(id)) css += ";vertical-align:super;font-size:0.66em";
+      else if (sub?.has(id)) css += ";vertical-align:sub;font-size:0.66em";
+    }
+    m.set(`${r.x.toFixed(1)},${r.y.toFixed(1)}`, css);
   }
   return m;
 }
@@ -1787,7 +1798,7 @@ export function hwpToTreePreviewHtml(
   const bodyCont = { x: mL, w: Math.max(1, pageW - mL - mR) };
 
   const pool = opts.rawBytes ? extractHwpBinImages(opts.rawBytes) : [];
-  const hwpxFills = buildHwpxFills(opts.rawBytes);
+  const { fills: hwpxFills, sup: hwpxSup, sub: hwpxSub } = buildHwpxStyleAux(opts.rawBytes);
   const hwpxHfLines = buildHwpxHfLines(opts.rawBytes);
   const cur = { i: 0 };
   const fnCount = { n: 0 };
@@ -1797,7 +1808,7 @@ export function hwpToTreePreviewHtml(
     const tree = pj<TNode>(safe(() => doc.getPageRenderTree!(pg)));
     if (!tree) continue;
     const ctx: TreeCtx = {
-      doc, styles: buildRunStyles(doc, pg), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
+      doc, styles: buildRunStyles(doc, pg, hwpxSup, hwpxSub), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
       linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount, hwpxHfLines,
     };
