@@ -19,6 +19,23 @@
 import { parse, type HTMLElement } from "node-html-parser";
 import { bytesToBase64 } from "../core/base64.js";
 import { extractHwpBinImages } from "../preview/hwpRender.js";
+import { readZip } from "../core/zip.js";
+import { parseHwpxStyles } from "../hwpx/styles.js";
+
+/** hwpx(zip) rawBytes → borderFillId → CSS background(그라데이션 포함). rhwp 가 그라데이션 채움을
+ *  흰색으로 떨구는 것을 raw OWPML 로 보강한다(예: 제목막대의 파란 그라데이션 띠). hwp(CFB)면 빈 맵. */
+function buildHwpxFills(rawBytes?: Uint8Array): Map<number, string> {
+  const map = new Map<number, string>();
+  if (!rawBytes || rawBytes.length < 4 || rawBytes[0] !== 0x50 || rawBytes[1] !== 0x4b) return map; // PK(zip)?
+  try {
+    const files = readZip(rawBytes);
+    const key = Object.keys(files).find((k) => /(^|\/)header\.xml$/i.test(k));
+    if (!key) return map;
+    const { borderFill } = parseHwpxStyles(new TextDecoder().decode(files[key]!));
+    for (const [id, bf] of borderFill) if (bf.bgCss) map.set(Number(id), bf.bgCss);
+  } catch { /* hwpx 아님/파싱 실패 → 빈 맵 */ }
+  return map;
+}
 
 /** rhwp `HwpDocument` 에서 이 모듈이 쓰는 메서드만 추린 구조적 타입. */
 export interface RhwpDoc {
@@ -1038,6 +1055,7 @@ interface TreeCtx {
   skipImage?: TNode;           // 쪽배경 페이지에서 배경 그림 노드(절대배치로 따로 그림)를 흐름에서 제외
   linePitch?: Map<TNode, number>; // TextLine → 다음 줄까지의 세로간격(빈 줄 높이 보정용, 표지 간격 보존)
   imgSeen: { src: string; x: number; y: number }[]; // 렌더한 이미지(중복 스킵용) — rhwp stepping 중복 아티팩트 대응
+  hwpxFills: Map<number, string>; // hwpx borderFillId → CSS 배경(그라데이션 등) — rhwp 미해석 채움 보강
 }
 
 /**
@@ -1545,7 +1563,11 @@ function renderTreeTable(node: TNode, ctx: TreeCtx, topLevel: boolean): string {
       rowSpan: typeof rs === "number" && rs > 0 ? rs : 1,
       colSpan: typeof cs === "number" && cs > 0 ? cs : 1,
       props: m?.props ?? null,
-      bg: cellBgFor(cell.bbox, ctx), // renderPageHtml 에서 추출한 셀 배경색(중첩표 헤더 등)
+      // 셀 배경: (1) renderPageHtml 추출색, 없으면 (2) hwpx raw 그라데이션(rhwp 가 흰색으로 떨군 것).
+      //   rhwp 가 solid 로 제대로 해석한 셀은 건드리지 않는다(props.fillType==="solid").
+      bg: cellBgFor(cell.bbox, ctx)
+        ?? (m?.props && m.props.fillType !== "solid" && typeof m.props.borderFillId === "number"
+          ? ctx.hwpxFills.get(m.props.borderFillId) : undefined),
       html: inner || "<br>",
       h: cell.bbox?.h, // 원본 셀 높이(행 높이 복원용)
     };
@@ -1712,6 +1734,7 @@ export function hwpToTreePreviewHtml(
   const bodyCont = { x: mL, w: Math.max(1, pageW - mL - mR) };
 
   const pool = opts.rawBytes ? extractHwpBinImages(opts.rawBytes) : [];
+  const hwpxFills = buildHwpxFills(opts.rawBytes);
   const cur = { i: 0 };
   const pages: string[] = [];
   let footZoneTop = Infinity; // 모든 페이지 통틀어 꼬리말 영역 최상단 y(하단 여백 reserve 계산용)
@@ -1721,7 +1744,7 @@ export function hwpToTreePreviewHtml(
     const ctx: TreeCtx = {
       doc, styles: buildRunStyles(doc, pg), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
-      linePitch: buildLinePitch(tree), imgSeen: [],
+      linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills,
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);

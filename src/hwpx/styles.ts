@@ -28,7 +28,9 @@ export interface BorderFill {
   right: Border;
   top: Border;
   bottom: Border;
-  bg?: string; // 배경색 (#rrggbb)
+  bg?: string; // 단색 배경색 (#rrggbb) — winBrush faceColor
+  /** CSS background 값(단색 또는 그라데이션). rhwp 가 그라데이션을 흰색으로 떨구는 것을 raw 로 보강할 때 쓴다. */
+  bgCss?: string;
 }
 export interface HwpxStyles {
   charPr: Map<string, CharPr>;
@@ -107,12 +109,27 @@ export function parseHwpxStyles(headerXml: string | undefined): HwpxStyles {
     if (id === undefined) continue;
     const brush = childLocal(bf, "fillBrush");
     const win = brush ? childLocal(brush, "winBrush") : undefined;
+    const bg = win ? color(attrOf(win, "faceColor")) : undefined;
+    // 그라데이션 채움 → CSS gradient (rhwp 는 그라데이션을 해석 못 해 흰색으로 떨군다).
+    let bgCss = bg;
+    const grad = brush ? childLocal(brush, "gradation") : undefined;
+    if (!bgCss && grad) {
+      const colors = childrenOf(grad).filter((c) => local(c) === "color")
+        .map((c) => color(attrOf(c, "value"))).filter((c): c is string => !!c);
+      if (colors.length >= 2) {
+        const type = (attrOf(grad, "type") ?? "LINEAR").toUpperCase();
+        const angle = Number(attrOf(grad, "angle")) || 0;
+        bgCss = type === "RADIAL"
+          ? `radial-gradient(circle, ${colors.join(", ")})`
+          : `linear-gradient(${angle + 90}deg, ${colors.join(", ")})`;
+      } else if (colors.length === 1) bgCss = colors[0];
+    }
     borderFill.set(id, {
       left: border(childLocal(bf, "leftBorder")),
       right: border(childLocal(bf, "rightBorder")),
       top: border(childLocal(bf, "topBorder")),
       bottom: border(childLocal(bf, "bottomBorder")),
-      bg: win ? color(attrOf(win, "faceColor")) : undefined,
+      bg, bgCss,
     });
   }
 
