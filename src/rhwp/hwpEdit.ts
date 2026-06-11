@@ -1816,8 +1816,13 @@ export function hwpToTreePreviewHtml(
   const footReserve = isFinite(footZoneTop) ? Math.max(0, Math.ceil(pageH - footZoneTop) + 4) : 0;
   const padBottom = footReserve ? `;padding-bottom:${footReserve}px` : "";
   return `<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Serif+KR:wght@400;600;700&display=swap">
 <style>
-  body{margin:0;background:#eceef0;padding:24px 0;font-family:'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#111}
+  /* 한글 웹폰트(Noto KR) — 원본 함초롬돋움/바탕이 시스템에 없을 때 폴백. font-family 체인의
+     문서폰트·맑은고딕 뒤에 두므로(fontStack), 원본 폰트가 있는 환경은 그대로 truth 폰트를 쓴다.
+     HY 헤드라인 등 독점폰트는 폴백되나 굵기 휴리스틱으로 두께를 근사한다. */
+  body{margin:0;background:#eceef0;padding:24px 0;font-family:'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',sans-serif;color:#111}
   /* 각 페이지는 원본 용지(A4 등) 비율로: 폭 고정 + 용지 높이만큼 min-height(짧은 페이지도 종이처럼). */
   .hp-page{position:relative;width:${pageW}px;min-height:${pageH}px;max-width:96%;margin:0 auto 22px;background:#fff;padding:${pad}${padBottom};
     box-shadow:0 1px 4px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.10);line-height:1.5;font-size:10.5pt;box-sizing:border-box}
