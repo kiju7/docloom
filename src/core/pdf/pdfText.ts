@@ -739,12 +739,12 @@ class ContentLexer extends PdfLexer {
     this.skipWsPublic();
     if (this.pos >= this.buf.length) return null;
     const c = this.buf[this.pos]!;
-    // 값으로 시작하는 문자들
-    if (
-      c === 0x2f || c === 0x28 || c === 0x5b || // / ( [
-      (c === 0x3c) || // < (hex 또는 dict)
-      c === 0x2b || c === 0x2d || c === 0x2e || (c >= 0x30 && c <= 0x39) // 부호/숫자
-    ) {
+    // 숫자/부호 — 콘텐츠 스트림엔 간접참조(N G R)가 없으므로 readToken·lookahead 없이 직접 파싱(핫패스).
+    if (c === 0x2b || c === 0x2d || c === 0x2e || (c >= 0x30 && c <= 0x39)) {
+      return { value: this.parseContentNumber() };
+    }
+    // 그 밖의 값으로 시작하는 문자들: / ( [ < (이름·문자열·배열·hex/딕셔너리)
+    if (c === 0x2f || c === 0x28 || c === 0x5b || c === 0x3c) {
       try {
         return { value: this.parseValue() };
       } catch {
@@ -773,6 +773,29 @@ class ContentLexer extends PdfLexer {
       return { op: "" };
     }
     return { op: CONTENT_OPS.has(s) ? s : "" };
+  }
+
+  /** 콘텐츠 스트림 숫자(부호+정수.소수, 지수표기 없음) 직접 파싱. 문자열 누적·참조탐색 생략. */
+  private parseContentNumber(): number {
+    const buf = this.buf;
+    const len = buf.length;
+    let p = this.pos;
+    let sign = 1;
+    const first = buf[p]!;
+    if (first === 0x2b) p++;
+    else if (first === 0x2d) { sign = -1; p++; }
+    let intPart = 0, frac = 0, scale = 1, dot = false;
+    while (p < len) {
+      const c = buf[p]!;
+      if (c >= 0x30 && c <= 0x39) {
+        if (dot) { frac = frac * 10 + (c - 0x30); scale *= 10; }
+        else intPart = intPart * 10 + (c - 0x30);
+        p++;
+      } else if (c === 0x2e && !dot) { dot = true; p++; }
+      else break;
+    }
+    this.pos = p;
+    return sign * (dot ? intPart + frac / scale : intPart);
   }
 
   private skipInlineImage(): void {
