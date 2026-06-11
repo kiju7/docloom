@@ -22,6 +22,34 @@ import { extractHwpBinImages } from "../preview/hwpRender.js";
 import { readZip } from "../core/zip.js";
 import { parseHwpxStyles } from "../hwpx/styles.js";
 
+/** hwpx(zip) rawBytes → 머리말/꼬리말 구분선(직선 개체) 색·두께. rhwp 가 HWPX 의
+ *  hp:line / hp:connectLine 개체를 layer tree 에 안 줘서(주황 구분선 누락) raw OWPML 로 복원. */
+function buildHwpxHfLines(rawBytes?: Uint8Array): { header?: { color: string; w: number }; footer?: { color: string; w: number } } {
+  const out: { header?: { color: string; w: number }; footer?: { color: string; w: number } } = {};
+  if (!rawBytes || rawBytes.length < 4 || rawBytes[0] !== 0x50 || rawBytes[1] !== 0x4b) return out;
+  try {
+    const files = readZip(rawBytes);
+    const dec = new TextDecoder();
+    for (const k of Object.keys(files)) {
+      if (!/section\d*\.xml$/i.test(k)) continue;
+      const xml = dec.decode(files[k]!);
+      for (const tag of ["header", "footer"] as const) {
+        if (out[tag]) continue;
+        const m = new RegExp(`<hp:${tag}\\b[^>]*>([\\s\\S]*?)</hp:${tag}>`).exec(xml);
+        if (!m) continue;
+        // 직선 개체의 lineShape — 회색 그림자(#B2B2B2)가 아닌 본선 색을 취한다.
+        for (const ls of m[1]!.matchAll(/<hp:lineShape\b[^>]*\bcolor="(#[0-9A-Fa-f]{6})"[^>]*?\bwidth="(\d+)"/g)) {
+          const color = ls[1]!;
+          if (/^#?(b2b2b2|000000|ffffff)$/i.test(color.replace("#", ""))) continue;
+          out[tag] = { color, w: Math.max(1, Math.round(Number(ls[2]) / 75)) };
+          break;
+        }
+      }
+    }
+  } catch { /* hwpx 아님/파싱 실패 */ }
+  return out;
+}
+
 /** hwpx(zip) rawBytes → borderFillId → CSS background(그라데이션 포함). rhwp 가 그라데이션 채움을
  *  흰색으로 떨구는 것을 raw OWPML 로 보강한다(예: 제목막대의 파란 그라데이션 띠). hwp(CFB)면 빈 맵. */
 function buildHwpxFills(rawBytes?: Uint8Array): Map<number, string> {
@@ -1057,6 +1085,7 @@ interface TreeCtx {
   imgSeen: { src: string; x: number; y: number }[]; // 렌더한 이미지(중복 스킵용) — rhwp stepping 중복 아티팩트 대응
   hwpxFills: Map<number, string>; // hwpx borderFillId → CSS 배경(그라데이션 등) — rhwp 미해석 채움 보강
   fnCount: { n: number }; // 각주 마커(FnMarker) 일련번호(문서 전역 공유) — rhwp 가 번호를 안 줘서 순번 부여
+  hwpxHfLines: { header?: { color: string; w: number }; footer?: { color: string; w: number } }; // hwpx 머리말/꼬리말 구분선
 }
 
 /**
@@ -1513,6 +1542,14 @@ function renderHeaderFooter(node: TNode, ctx: TreeCtx): string {
   const anchor = (y: number, h: number): string =>
     isFooter ? `bottom:${Math.round(ctx.pageH - y - h)}px` : `top:${Math.round(y)}px`;
   const out: string[] = [];
+  // 머리말/꼬리말 구분선(주황 등) — rhwp 가 HWPX line/connectLine 개체를 안 줘서 raw OWPML 색으로 렌더.
+  //   머리말선: 머리말 영역 아래(본문 경계), 꼬리말선: 꼬리말 영역 위(글자 위). 둘 다 전폭.
+  const hl = isFooter ? ctx.hwpxHfLines.footer : ctx.hwpxHfLines.header;
+  if (hl && node.bbox) {
+    const b = node.bbox;
+    const pos = isFooter ? `bottom:${Math.round(ctx.pageH - b.y)}px` : `top:${Math.round(b.y + b.h - hl.w)}px`;
+    out.push(`<div class="hp-hr" style="left:${Math.round(b.x)}px;${pos};width:${Math.round(b.w)}px;height:${hl.w}px;background:${hl.color}"></div>`);
+  }
   (function walk(n: TNode) {
     if (!n || typeof n !== "object") return;
     if (n.type === "TextLine") {
@@ -1751,6 +1788,7 @@ export function hwpToTreePreviewHtml(
 
   const pool = opts.rawBytes ? extractHwpBinImages(opts.rawBytes) : [];
   const hwpxFills = buildHwpxFills(opts.rawBytes);
+  const hwpxHfLines = buildHwpxHfLines(opts.rawBytes);
   const cur = { i: 0 };
   const fnCount = { n: 0 };
   const pages: string[] = [];
@@ -1761,7 +1799,7 @@ export function hwpToTreePreviewHtml(
     const ctx: TreeCtx = {
       doc, styles: buildRunStyles(doc, pg), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
-      linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount,
+      linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount, hwpxHfLines,
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);
