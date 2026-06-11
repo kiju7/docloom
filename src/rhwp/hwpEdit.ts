@@ -1089,6 +1089,7 @@ interface TreeCtx {
   hwpxFills: Map<number, string>; // hwpx borderFillId → CSS 배경(그라데이션 등) — rhwp 미해석 채움 보강
   fnCount: { n: number }; // 각주 마커(FnMarker) 일련번호(문서 전역 공유) — rhwp 가 번호를 안 줘서 순번 부여
   hwpxHfLines: { header?: { color: string; w: number }; footer?: { color: string; w: number } }; // hwpx 머리말/꼬리말 구분선
+  fnSep?: { w: number; color: string; thick: number }; // 각주 구분선 스타일(footnoteArea 흐름 블록 위에 깐다)
 }
 
 /**
@@ -1287,20 +1288,44 @@ function hfSeparatorLinesHtml(doc: RhwpDoc, pg: number, pageH: number): { html: 
   if (!lt || !lt.root) return { html: "", footTop: Infinity };
   const out: string[] = [];
   let footTop = Infinity;
-  // footnoteArea = 각주 구분선/글자 그룹(본문 하단). 구분선만 bottom 앵커로 렌더(글자는 흐름이 따로 냄).
-  const visit = (n: any, area: "" | "header" | "footer" | "footnote"): void => {
+  const visit = (n: any, area: "" | "header" | "footer"): void => {
     if (!n || typeof n !== "object") return;
     const k = n.groupKind?.kind;
-    const a = k === "header" || k === "footer" ? k : k === "footnoteArea" ? "footnote" : area;
+    const a = k === "header" || k === "footer" ? k : area;
     for (const op of (n.ops ?? [])) {
       if (a === "footer" && typeof op.bbox?.y === "number") footTop = Math.min(footTop, op.bbox.y);
-      if (a) { const s = decorLineHtml(op, a === "footer" || a === "footnote", pageH); if (s) out.push(s); }
+      if (a) { const s = decorLineHtml(op, a === "footer", pageH); if (s) out.push(s); }
     }
     for (const c of (n.children ?? [])) visit(c, a);
     if (n.child) visit(n.child, a);
   };
   visit((lt as { root: unknown }).root, "");
   return { html: out.join(""), footTop };
+}
+
+/** 각주 구분선 스타일 — layer tree footnoteArea 그룹의 line/path op(색·길이·두께). FootnoteArea 흐름
+ *  블록 맨 위에 흐름요소로 깔아 각주 글자 바로 위에 오게 한다(absolute 면 흐름 글자와 어긋남). */
+function buildFnSep(doc: RhwpDoc, pg: number): { w: number; color: string; thick: number } | undefined {
+  if (!doc.getPageLayerTree) return undefined;
+  const lt = pj<{ root?: unknown }>(safe(() => doc.getPageLayerTree!(pg)));
+  if (!lt || !lt.root) return undefined;
+  let sep: { w: number; color: string; thick: number } | undefined;
+  const kids = (n: any) => [...(n.children ?? []), ...(n.child ? [n.child] : [])];
+  const visit = (n: any, inFn: boolean): void => {
+    if (!n || typeof n !== "object" || sep) return;
+    const fn = inFn || n.groupKind?.kind === "footnoteArea";
+    if (fn) for (const op of (n.ops ?? [])) {
+      if ((op.type === "line" || op.type === "path") && op.bbox) {
+        const color = op.style?.color || op.style?.strokeColor || "#000000";
+        const w = op.type === "line" && typeof op.x1 === "number" ? Math.abs(op.x2 - op.x1) : op.bbox.width;
+        sep = { w: Math.max(1, Math.round(w || op.bbox.width || 0)), color, thick: Math.max(0.5, op.style?.width || op.style?.strokeWidth || 0.5) };
+        return;
+      }
+    }
+    for (const c of kids(n)) visit(c, fn);
+  };
+  visit((lt as { root: unknown }).root, false);
+  return sep;
 }
 
 /** 셀 bbox 좌상단에 가장 가까운(3px 내) 배경색. */
@@ -1506,6 +1531,14 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
     case "Header": case "Footer":
       // 머리말/꼬리말(쪽번호 등)은 흐름이 아니라 **실제 좌표로 절대배치**(페이지 상/하단 고정).
       return renderHeaderFooter(node, ctx);
+    case "FootnoteArea": {
+      // 각주 영역 — 흐름 블록 맨 위에 구분선(흐름요소)을 깔고 각주 글자를 그 아래로(텍스트와 항상 정렬).
+      const inner = (node.children ?? []).map((c) => renderTreeNode(c, ctx, inCell, cont)).join("");
+      const sep = ctx.fnSep
+        ? `<div class="hp-fn-sep" style="width:${ctx.fnSep.w}px;height:${ctx.fnSep.thick.toFixed(1)}px;background:${ctx.fnSep.color}"></div>`
+        : "";
+      return `<div class="hp-fnarea">${sep}${inner}</div>`;
+    }
     case "PageBg": case "Rect": case "Line":
       return ""; // 장식(배경/셀선) — 색은 셀 스타일에서 따로 취득
     default: {
@@ -1810,7 +1843,7 @@ export function hwpToTreePreviewHtml(
     const ctx: TreeCtx = {
       doc, styles: buildRunStyles(doc, pg, hwpxSup, hwpxSub), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
-      linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount, hwpxHfLines,
+      linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount, hwpxHfLines, fnSep: buildFnSep(doc, pg),
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);
@@ -1853,6 +1886,9 @@ export function hwpToTreePreviewHtml(
   /* 다단(多段): 전체폭 밴드(흐름) + 좁은 단 묶음(flex 좌우 병렬). y 순으로 흐름배치 → 겹침 없음. */
   .hp-cols{display:flex;align-items:flex-start}
   .hp-colcell{overflow-wrap:anywhere}
+  /* 각주 영역 — 본문과 사이 여백 + 구분선 아래 각주 글자(흐름). */
+  .hp-fnarea{margin-top:14px}
+  .hp-fn-sep{margin-bottom:3px}
   /* 부유 글상자/도형 — bbox 절대좌표 오버레이(테두리+글자). */
   .hp-shape{position:absolute;z-index:2;box-sizing:border-box;overflow:visible}
   /* 이미지는 inline-block 으로 — 같은 줄에 들어가면 옆으로, 넘치면 아래로(원본의 가로/세로 배치 근사). */
