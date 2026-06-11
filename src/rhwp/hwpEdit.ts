@@ -1575,6 +1575,10 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
     // 행 높이 = 그 행에서 시작하는 비-rowspan 셀들의 원본 bbox 높이 최댓값(원본 행높이 복원).
     // min-height 성격이라 내용이 더 길면 td 가 늘어난다(잘림 없음). rowspan 셀은 여러 행에 걸쳐 제외.
     const rowH = Math.max(0, ...rowCells.filter((c) => c.rowSpan === 1 && typeof c.h === "number").map((c) => c.h!));
+    // 얇은(<14px) 빈 행 = 장식용 가로선/색띠(제목 위아래 줄 등). 빈 줄(<br>)의 min-height·패딩이
+    // 부풀리지 않게 줄높이·패딩을 0으로 — 원본의 얇은 선 두께를 보존한다.
+    const thinDecor = rowH > 0 && rowH < 14 &&
+      rowCells.every((c) => !c.html || c.html.replace(/<[^>]+>/g, "").trim() === "");
     const tds = rowCells
       .sort((a, b) => a.col - b.col)
       .map((c) => {
@@ -1582,8 +1586,9 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
         // 최상위 셀은 원본 배경/테두리(cellCss), 중첩 셀은 API 부재라 기본 테두리.
         const base = c.props ? cellCss(c.props) : "border:1px solid #bbb;padding:3px 6px;vertical-align:top";
         // renderPageHtml 에서 추출한 셀 배경색으로 보강(중첩표 헤더색 등 — cellCss 가 못 얻는 것).
-        const css = c.bg ? `${base};background:${c.bg}` : base;
-        return `<td${span} style="${css}">${c.html}</td>`;
+        let css = c.bg ? `${base};background:${c.bg}` : base;
+        if (thinDecor) css += `;padding-top:0;padding-bottom:0;line-height:0;font-size:0;height:${Math.round(rowH)}px`;
+        return `<td${span} style="${css}">${thinDecor ? "" : c.html}</td>`;
       })
       .join("");
     const trStyle = rowH > 0 ? ` style="height:${Math.round(rowH)}px"` : "";
