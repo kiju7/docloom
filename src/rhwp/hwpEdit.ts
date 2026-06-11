@@ -1056,6 +1056,7 @@ interface TreeCtx {
   linePitch?: Map<TNode, number>; // TextLine → 다음 줄까지의 세로간격(빈 줄 높이 보정용, 표지 간격 보존)
   imgSeen: { src: string; x: number; y: number }[]; // 렌더한 이미지(중복 스킵용) — rhwp stepping 중복 아티팩트 대응
   hwpxFills: Map<number, string>; // hwpx borderFillId → CSS 배경(그라데이션 등) — rhwp 미해석 채움 보강
+  fnCount: { n: number }; // 각주 마커(FnMarker) 일련번호(문서 전역 공유) — rhwp 가 번호를 안 줘서 순번 부여
 }
 
 /**
@@ -1310,10 +1311,21 @@ function fontStack(family: string): string {
     : `'${f}','맑은 고딕','Malgun Gothic','Noto Sans KR',sans-serif`;
 }
 
+/** 글꼴 이름의 굵기 힌트 → font-weight. 한글 헤드라인/견고딕 등 굵은 폰트는 시스템에 없어 보통굵기로
+ *  폴백되면 얇아 보이므로, 이름으로 굵기를 추정해 폴백 폰트에도 두께를 입힌다(bold 속성과 별개). */
+function fontWeightFor(family: string | undefined, bold: boolean): number | undefined {
+  const f = family ?? "";
+  if (/헤드라인|Headline|Heavy|Black|견고딕|견명조|ExtraBold|UltraBold|울트라/i.test(f)) return 800;
+  if (bold) return 700;
+  if (/중고딕|중명조|태고딕|태명조|SemiBold|세미볼드|Medium|미디엄/i.test(f)) return 600;
+  return undefined;
+}
+
 function runCss(r: any): string {
   const css: string[] = [];
   if (typeof r.fontSize === "number") css.push(`font-size:${(r.fontSize * 0.75).toFixed(1)}pt`);
-  if (r.bold) css.push("font-weight:700");
+  const fw = fontWeightFor(r.fontFamily, !!r.bold);
+  if (fw) css.push(`font-weight:${fw}`);
   if (r.italic) css.push("font-style:italic");
   const deco: string[] = [];
   if (r.underline) deco.push("underline");
@@ -1409,6 +1421,10 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
             }
             // 런 내부 연속 공백(수동 간격)도 보존: white-space:pre-wrap.
             return `<span style="${style}">${esc(raw)}</span>`;
+          }
+          if (c.type === "FnMarker") {
+            // 각주 마커(BMT¹⁾ 의 "1)") — rhwp 는 bbox 만 주고 번호가 없어 문서 순번을 위첨자로.
+            return `<sup class="hp-fn">${++ctx.fnCount.n})</sup>`;
           }
           if (c.type === "Image") {
             const uri = imageSrcFor(c, ctx);
@@ -1736,6 +1752,7 @@ export function hwpToTreePreviewHtml(
   const pool = opts.rawBytes ? extractHwpBinImages(opts.rawBytes) : [];
   const hwpxFills = buildHwpxFills(opts.rawBytes);
   const cur = { i: 0 };
+  const fnCount = { n: 0 };
   const pages: string[] = [];
   let footZoneTop = Infinity; // 모든 페이지 통틀어 꼬리말 영역 최상단 y(하단 여백 reserve 계산용)
   for (let pg = 0; pg < n; pg++) {
@@ -1744,7 +1761,7 @@ export function hwpToTreePreviewHtml(
     const ctx: TreeCtx = {
       doc, styles: buildRunStyles(doc, pg), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
-      linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills,
+      linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount,
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);
