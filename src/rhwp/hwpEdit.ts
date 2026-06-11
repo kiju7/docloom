@@ -21,6 +21,22 @@ import { bytesToBase64 } from "../core/base64.js";
 import { extractHwpBinImages } from "../preview/hwpRender.js";
 import { readZip } from "../core/zip.js";
 import { parseHwpxStyles } from "../hwpx/styles.js";
+import { hwpxToPreviewHtml } from "../formats/hwpx.js";
+
+/** hwpx(zip) 원본의 표 개수(section*.xml 의 <hp:tbl>). rhwp under-pagination 감지용. hwp/비zip 이면 0. */
+function rawHwpxTableCount(rawBytes?: Uint8Array): number {
+  if (!rawBytes || rawBytes.length < 4 || rawBytes[0] !== 0x50 || rawBytes[1] !== 0x4b) return 0;
+  try {
+    const files = readZip(rawBytes);
+    const dec = new TextDecoder();
+    let n = 0;
+    for (const k of Object.keys(files)) {
+      if (!/section\d*\.xml$/i.test(k)) continue;
+      n += (dec.decode(files[k]!).match(/<hp:tbl\b/g) ?? []).length;
+    }
+    return n;
+  } catch { return 0; }
+}
 
 /** hwpx(zip) rawBytes → 머리말/꼬리말 구분선(직선 개체) 색·두께. rhwp 가 HWPX 의
  *  hp:line / hp:connectLine 개체를 layer tree 에 안 줘서(주황 구분선 누락) raw OWPML 로 복원. */
@@ -1854,6 +1870,14 @@ export function hwpToTreePreviewHtml(
   }
   // 트리 미지원/실패 → 기존 흐름배치 미리보기로 폴백(안전망).
   if (pages.length === 0) return hwpToRichPreviewHtml(doc, opts);
+
+  // rhwp 가 대용량/복잡 문서를 표지(1~소수 페이지)만 렌더하고 나머지를 누락하는 경우(pageCount 버그) →
+  // rhwp 가 캡처한 표가 원본 OWPML 표 수의 30% 미만이면 네이티브 hwpx 렌더로 폴백(내용 완전성 우선).
+  const rawTbls = rawHwpxTableCount(opts.rawBytes);
+  if (rawTbls >= 12) {
+    const renderedTbls = pages.reduce((a, p) => a + (p.match(/<table/g) ?? []).length, 0);
+    if (renderedTbls < rawTbls * 0.3) return hwpxToPreviewHtml(opts.rawBytes!, { title: opts.title });
+  }
 
   const title = esc(opts.title ?? "한글 미리보기");
   // 꼬리말 영역만큼 페이지 하단에 여백을 확보 → 본문(흐름)이 길어져도 bottom 앵커 꼬리말과 겹치지 않는다.
