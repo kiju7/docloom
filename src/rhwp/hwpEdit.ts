@@ -1102,6 +1102,7 @@ interface TreeCtx {
   skipImage?: TNode;           // 쪽배경 페이지에서 배경 그림 노드(절대배치로 따로 그림)를 흐름에서 제외
   linePitch?: Map<TNode, number>; // TextLine → 다음 줄까지의 세로간격(빈 줄 높이 보정용, 표지 간격 보존)
   imgSeen: { src: string; x: number; y: number }[]; // 렌더한 이미지(중복 스킵용) — rhwp stepping 중복 아티팩트 대응
+  overlayPos: Set<string>; // 오버레이 이미지(도장·서명) 위치 "x,y" — 흐름 렌더에서 스킵(절대배치로 따로 그림)
   hwpxFills: Map<number, string>; // hwpx borderFillId → CSS 배경(그라데이션 등) — rhwp 미해석 채움 보강
   fnCount: { n: number }; // 각주 마커(FnMarker) 일련번호(문서 전역 공유) — rhwp 가 번호를 안 줘서 순번 부여
   hwpxHfLines: { header?: { color: string; w: number }; footer?: { color: string; w: number } }; // hwpx 머리말/꼬리말 구분선
@@ -1275,6 +1276,27 @@ function renderShapeOverlays(doc: RhwpDoc, pg: number): string {
     html += `<div class="hp-shape" style="left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${Math.round(s.w)}px;height:${Math.round(s.h)}px;${border}${fill}">${inner}</div>`;
   }
   return html;
+}
+
+/** 오버레이 이미지 — wrap=behindText/inFrontOfText(도장·서명·워터마크 등 텍스트 위/뒤 고정)는 흐름이 아니라
+ *  bbox 절대좌표로 그려야 한다(흐름 배치하면 엉뚱한 곳으로 감). 흐름 렌더에서는 같은 위치를 스킵하도록
+ *  pos 집합을 함께 돌려준다. */
+function renderOverlayImages(doc: RhwpDoc, pg: number): { html: string; pos: Set<string> } {
+  const pos = new Set<string>();
+  if (!doc.getPageControlLayout || !doc.getControlImageData) return { html: "", pos };
+  const cl = pj<{ controls?: any[] }>(safe(() => doc.getPageControlLayout!(pg)));
+  const ovls = (cl?.controls ?? []).filter((c) => c?.type === "image"
+    && /behindText|inFrontOfText|behind|front/i.test(c.wrap ?? "") && typeof c.x === "number" && typeof c.y === "number");
+  let html = "";
+  for (const c of ovls) {
+    pos.add(`${Math.round(c.x)},${Math.round(c.y)}`);
+    const data = safe(() => doc.getControlImageData!(c.secIdx, c.paraIdx, c.controlIdx));
+    if (!data || !data.length || data.length > MAX_IMG_BYTES) continue;
+    const mime = (doc.getControlImageMime && safe(() => doc.getControlImageMime!(c.secIdx, c.paraIdx, c.controlIdx))) || "image/png";
+    const z = /front/i.test(c.wrap) ? 3 : 1; // inFrontOfText 위, behindText 아래(본문 z=2 사이)
+    html += `<img class="hp-ovl" style="left:${Math.round(c.x)}px;top:${Math.round(c.y)}px;width:${Math.round(c.w)}px;height:${Math.round(c.h)}px;z-index:${z}" src="data:${mime};base64,${bytesToBase64(data)}">`;
+  }
+  return { html, pos };
 }
 
 function decorLineHtml(op: { type?: string; x1?: number; y1?: number; x2?: number; y2?: number;
@@ -1476,6 +1498,7 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
     }
     case "Image": {
       if (ctx.skipImage && node === ctx.skipImage) return ""; // 쪽배경 그림은 절대배치로 따로 그림
+      if (node.bbox && ctx.overlayPos.has(`${Math.round(node.bbox.x)},${Math.round(node.bbox.y)}`)) return ""; // 오버레이(도장·서명)
       const uri = imageSrcFor(node, ctx); // 위치(bbox) 매칭 → 정답 바이트(폴백: 풀)
       if (!uri) return "";
       const b = node.bbox;
@@ -1522,9 +1545,10 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
             return `<sup class="hp-fn">${++ctx.fnCount.n})</sup>`;
           }
           if (c.type === "Image") {
+            const b = c.bbox;
+            if (b && ctx.overlayPos.has(`${Math.round(b.x)},${Math.round(b.y)}`)) return ""; // 오버레이(도장·서명)는 절대배치로 따로
             const uri = imageSrcFor(c, ctx);
             if (!uri) return "";
-            const b = c.bbox;
             if (b && uri !== TRANSPARENT_PX) {
               if (ctx.imgSeen.some((s) => s.src === uri && Math.abs(s.x - b.x) < 100 && Math.abs(s.y - b.y) < 100)) return "";
               ctx.imgSeen.push({ src: uri, x: b.x, y: b.y });
@@ -1883,17 +1907,19 @@ export function hwpToTreePreviewHtml(
   for (let pg = 0; pg < n; pg++) {
     const tree = pj<TNode>(safe(() => doc.getPageRenderTree!(pg)));
     if (!tree) continue;
+    const overlay = renderOverlayImages(doc, pg); // 도장·서명 등(절대배치) + 흐름 스킵 위치
     const ctx: TreeCtx = {
       doc, styles: buildRunStyles(doc, pg, hwpxSup, hwpxSub), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
       linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount, hwpxHfLines, fnSep: buildFnSep(doc, pg),
+      overlayPos: overlay.pos,
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);
     const hf = hfSeparatorLinesHtml(doc, pg, pageH);
     if (isFinite(hf.footTop)) footZoneTop = Math.min(footZoneTop, hf.footTop);
     const shapes = renderShapeOverlays(doc, pg);
-    pages.push(bg ? renderBgPageFlow(tree, bg, ctx) : `<div class="hp-page">${renderTreeNode(tree, ctx, false, bodyCont)}${hf.html}${shapes}</div>`);
+    pages.push(bg ? renderBgPageFlow(tree, bg, ctx) : `<div class="hp-page">${renderTreeNode(tree, ctx, false, bodyCont)}${hf.html}${shapes}${overlay.html}</div>`);
   }
   // 트리 미지원/실패 → 기존 흐름배치 미리보기로 폴백(안전망).
   if (pages.length === 0) return hwpToRichPreviewHtml(doc, opts);
@@ -1942,6 +1968,8 @@ export function hwpToTreePreviewHtml(
   .hp-fn-sep{margin-bottom:3px}
   /* 부유 글상자/도형 — bbox 절대좌표 오버레이(테두리+글자). */
   .hp-shape{position:absolute;z-index:2;box-sizing:border-box;overflow:visible}
+  /* 오버레이 이미지(도장·서명·워터마크 — wrap behindText/inFrontOfText) — bbox 절대좌표. */
+  .hp-ovl{position:absolute;pointer-events:none}
   /* 이미지는 inline-block 으로 — 같은 줄에 들어가면 옆으로, 넘치면 아래로(원본의 가로/세로 배치 근사). */
   .hp-img{display:inline-block;vertical-align:top;margin:4px 6px 4px 0}
   .hp-img img{display:block}
