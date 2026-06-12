@@ -60,7 +60,10 @@ function pageImageCount(doc: RhwpDocFull, pg: number): number {
   if (!cl) return 0;
   const ids = new Set<string>();
   for (const c of cl.controls ?? []) {
-    if (c?.type === "image") ids.add(`${c.secIdx},${c.paraIdx},${c.controlIdx}`);
+    // 식별자가 불완전(undefined)한 컨트롤은 신뢰 불가(추출·dedup 불가) → 세지 않는다(미리보기와 동일).
+    if (c?.type === "image" && typeof c.secIdx === "number" && typeof c.paraIdx === "number" && typeof c.controlIdx === "number") {
+      ids.add(`${c.secIdx},${c.paraIdx},${c.controlIdx}`);
+    }
   }
   return ids.size;
 }
