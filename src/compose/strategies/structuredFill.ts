@@ -66,11 +66,12 @@ function selfLabel(text: string): string {
 }
 
 /** 채울 칸인가: 빈 칸 또는 "라벨:" 로 끝나는 칸. (라벨 셀·기존 본문은 제외 → 문맥으로만) */
-function isFillTarget(current: string): boolean {
+export function isFillTarget(current: string): boolean {
   return current.trim() === "" || /[::]\s*$/.test(current);
 }
 
-function buildUser(
+/** 구조화 프롬프트(항목/라벨 동반). hwp(rhwp) 경로도 공유한다. */
+export function buildStructuredUser(
   fields: { id: string; label: string; role: string; current: string }[],
   material: string,
 ): string {
@@ -115,7 +116,7 @@ export const structuredFill: FillStrategy = {
 
     let slots: Record<string, string> = {};
     if (send.length > 0) {
-      const raw = await llm.chatJson({ model, system: FILL_SYSTEM, user: buildUser(send, material) });
+      const raw = await llm.chatJson({ model, system: FILL_SYSTEM, user: buildStructuredUser(send, material) });
       const parsed = FILL_SCHEMA.safeParse(raw);
       if (parsed.success) slots = parsed.data.slots;
     }
