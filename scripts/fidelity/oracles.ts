@@ -135,7 +135,11 @@ function extractTruth(doc: RhwpDocFull): Truth {
 export function rhwpOracles(doc: RhwpDocFull, html: string): Finding[] {
   const findings: Finding[] = [];
   const truth = extractTruth(doc);
-  const vis = htmlToVisibleText(html);
+  // 각주 마커(<sup class="hp-fn">1)</sup>)는 렌더가 합성한 번호로 데이터모델 셀텍스트엔
+  // 없다. 이게 본문/셀 글자 사이에 끼면 연속-부분문자열 표지문 매칭을 깨뜨려 거짓 누락이
+  // 난다(예: "우수빈,박승희" 가 "우수빈1),박승희" 로). 표지문 매칭 전에 제거한다.
+  const cleanHtml = html.replace(/<sup class="hp-fn">[^<]*<\/sup>/g, "");
+  const vis = htmlToVisibleText(cleanHtml);
   const visStrip = strip(vis);
 
   // ① 특수기호 누락 — 원본 기호 중 렌더 출력에 아예 없는 것(가장 직접적인 불만)
