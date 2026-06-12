@@ -1466,8 +1466,14 @@ function buildRunLeadX(doc: RhwpDoc, pg: number): Map<string, number> {
 /** 트리 노드 → HTML(재귀). inCell: 표 셀 안. cont: 정렬 판정용 담는 가로범위(셀/본문). */
 function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: number; w: number }): string {
   switch (node.type) {
-    case "Table":
-      return renderTreeTable(node, ctx, !inCell);
+    case "Table": {
+      const tbl = renderTreeTable(node, ctx, !inCell);
+      // 원본에서 우측/중앙에 놓인 표(bbox.x 가 내용영역 좌단보다 오른쪽) → margin-left 로 수평위치 복원.
+      if (!inCell && node.bbox && cont && node.bbox.x > cont.x + 8) {
+        return `<div style="margin-left:${Math.round(node.bbox.x - cont.x)}px">${tbl}</div>`;
+      }
+      return tbl;
+    }
     case "Image": {
       if (ctx.skipImage && node === ctx.skipImage) return ""; // 쪽배경 그림은 절대배치로 따로 그림
       const uri = imageSrcFor(node, ctx); // 위치(bbox) 매칭 → 정답 바이트(폴백: 풀)
@@ -1484,6 +1490,8 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
     }
     case "TextLine": {
       // 줄 안의 글자(TextRun)와 **글자처럼 박힌 그림(Image)** 을 함께 렌더(그림 누락 방지).
+      // 글자 없이 그림만 있는 줄 = 부유(중앙/우측 배치) 그림 → bbox.x 로 수평위치 복원(좌측흐름 방지).
+      const imgOnly = !(node.children ?? []).some((c) => c.type === "TextRun" && (c.text ?? "").trim().length > 0);
       const html = (node.children ?? [])
         .map((c) => {
           if (c.type === "TextRun") {
@@ -1522,7 +1530,9 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
               ctx.imgSeen.push({ src: uri, x: b.x, y: b.y });
             }
             const dim = b && b.w > 0 && b.h > 0 ? `width:${Math.round(b.w)}px;height:${Math.round(b.h)}px;` : "";
-            return `<img alt="" style="${dim}max-width:100%;vertical-align:top" src="${uri}">`;
+            // 부유 그림(글자 없는 줄)은 원본 수평위치(중앙·우측 등)를 margin-left 로 복원.
+            const ml = imgOnly && b && cont && b.x > cont.x + 4 ? `margin-left:${Math.round(b.x - cont.x)}px;` : "";
+            return `<img alt="" style="${ml}${dim}max-width:100%;vertical-align:top" src="${uri}">`;
           }
           return "";
         })
