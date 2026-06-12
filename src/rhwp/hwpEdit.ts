@@ -1126,9 +1126,12 @@ function buildPageImages(doc: RhwpDoc, pg: number): { imgs: PageImg[]; canon: Se
     const cl = pj<{ controls?: any[] }>(safe(() => doc.getPageControlLayout!(pg)));
     const byId = new Map<string, any>();
     for (const c of (cl?.controls ?? [])) {
-      if (c?.type === "image" && typeof c.x === "number" && typeof c.y === "number") {
-        byId.set(`${c.secIdx},${c.paraIdx},${c.controlIdx}`, c); // 마지막이 남는다(최종 위치)
-      }
+      if (c?.type !== "image" || typeof c.x !== "number" || typeof c.y !== "number") continue;
+      // stepping 아티팩트는 같은 컨트롤을 **오른쪽(+) 으로** 밀며 토한다 → 가장 왼쪽(min x)이
+      // 용지 안 실제 위치다. 식별자별로 최소 x occurrence 를 채택(용지밖 복사본 배제).
+      const id = `${c.secIdx},${c.paraIdx},${c.controlIdx}`;
+      const prev = byId.get(id);
+      if (!prev || c.x < prev.x) byId.set(id, c);
     }
     const out: PageImg[] = [];
     const canon = new Set<string>();
@@ -1537,6 +1540,9 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
       // 줄 안의 글자(TextRun)와 **글자처럼 박힌 그림(Image)** 을 함께 렌더(그림 누락 방지).
       // 글자 없이 그림만 있는 줄 = 부유(중앙/우측 배치) 그림 → bbox.x 로 수평위치 복원(좌측흐름 방지).
       const imgOnly = !(node.children ?? []).some((c) => c.type === "TextRun" && (c.text ?? "").trim().length > 0);
+      // 그림이 1개인 줄만 bbox.x 로 수평 복원(부유 그림). 여러 개면 margin-left 가 inline 흐름과
+      // 누적돼 오른쪽으로 폭주(필름스트립 줄바꿈)하므로 자연 흐름에 맡긴다.
+      const singleImg = (node.children ?? []).filter((c) => c.type === "Image").length === 1;
       const html = (node.children ?? [])
         .map((c) => {
           if (c.type === "TextRun") {
@@ -1577,8 +1583,14 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
               ctx.imgSeen.push({ src: uri, x: b.x, y: b.y });
             }
             const dim = b && b.w > 0 && b.h > 0 ? `width:${Math.round(b.w)}px;height:${Math.round(b.h)}px;` : "";
-            // 부유 그림(글자 없는 줄)은 원본 수평위치(중앙·우측 등)를 margin-left 로 복원.
-            const ml = imgOnly && b && cont && b.x > cont.x + 4 ? `margin-left:${Math.round(b.x - cont.x)}px;` : "";
+            // 부유 그림(글자 없는 단일 그림 줄)만 원본 수평위치를 margin-left 로 복원하되, **컨테이너
+            // 밖으로 나가지 않게 clamp**(rhwp 가 준 x 가 용지 밖이어도 영역 안에 머문다).
+            let ml = "";
+            if (singleImg && imgOnly && b && cont && b.x > cont.x + 4) {
+              const want = b.x - cont.x, max = Math.max(0, cont.w - (b.w || 0));
+              const v = Math.round(Math.min(want, max));
+              if (v > 4) ml = `margin-left:${v}px;`;
+            }
             return `<img alt="" style="${ml}${dim}max-width:100%;vertical-align:top" src="${uri}">`;
           }
           return "";
@@ -1589,6 +1601,8 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
       if (align) styles.push(`text-align:${align}`);
       // 표 셀 안 줄은 좁은 셀에서 넘치지 않게 래핑 허용(.hp-ln 의 nowrap 을 덮음). 본문 줄은 nowrap 유지.
       if (inCell) styles.push("white-space:pre-wrap");
+      // 그림이 여러 개인 줄(필름스트립 등)은 가로폭을 넘으면 다음 줄로 래핑(영역 밖 폭주 방지).
+      else if (imgOnly && !singleImg) styles.push("white-space:normal");
       // 세로 리듬 보존: 줄을 **다음 줄까지의 간격(pitch)** 만큼 슬롯으로 차지시킨다.
       // ⚠ 글자높이만 쓰면 줄간격이 압축돼, 표지처럼 빈/공백 줄로 아래까지 밀어둔 글(하단 회사명
       //   등)이 중간으로 올라온다. ⚠ "빈 줄"이 사실 공백 런을 담아 html 이 비지 않는 경우도 많으니
