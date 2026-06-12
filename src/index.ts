@@ -90,7 +90,7 @@ export type { DocModel, Block, Run, Mark } from "./model/docModel.js";
 export type { Manifest } from "./model/manifest.js";
 
 // ── compose (양식 채움 + LLM) ───────────────────────────────────────────────
-export { composeDocument, jsonFill, extractDescriptor, applyFill, sanitizeInline } from "./compose/index.js";
+export { composeDocument, jsonFill, structuredFill, extractDescriptor, applyFill, sanitizeInline } from "./compose/index.js";
 export type {
   ComposeDeps,
   ComposeResult,

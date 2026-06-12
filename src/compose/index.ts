@@ -76,6 +76,7 @@ export async function composeDocument(
 }
 
 export { jsonFill } from "./strategies/jsonFill.js";
+export { structuredFill } from "./strategies/structuredFill.js";
 export { extractDescriptor } from "./descriptor.js";
 export { applyFill, sanitizeInline } from "./fill.js";
 export type { FillStrategy, FillResult, LlmClient, TemplateDescriptor, Slot, RepeatGroup } from "./types.js";
