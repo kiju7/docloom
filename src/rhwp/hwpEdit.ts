@@ -1774,8 +1774,9 @@ function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): 
     const rowH = Math.max(0, ...rowCells.filter((c) => c.rowSpan === 1 && typeof c.h === "number").map((c) => c.h!));
     // 얇은(<14px) 빈 행 = 장식용 가로선/색띠(제목 위아래 줄 등). 빈 줄(<br>)의 min-height·패딩이
     // 부풀리지 않게 줄높이·패딩을 0으로 — 원본의 얇은 선 두께를 보존한다.
+    // 그림이 든 셀은 글자가 없어도(태그 제거 시 빈 문자열) 장식 빈행이 아니다 — img 있으면 제외.
     const thinDecor = rowH > 0 && rowH < 14 &&
-      rowCells.every((c) => !c.html || c.html.replace(/<[^>]+>/g, "").trim() === "");
+      rowCells.every((c) => !c.html || (c.html.replace(/<[^>]+>/g, "").trim() === "" && !/<img/i.test(c.html)));
     const tds = rowCells
       .sort((a, b) => a.col - b.col)
       .map((c) => {
@@ -1851,7 +1852,10 @@ function renderBgPageFlow(tree: TNode, bg: TNode, ctx: TreeCtx): string {
   //   getCell*PropertiesAt 실값을 씀). **복수 표/복합 콘텐츠**(예: 제안요청서 = 표 2개 + 제목)
   //   → 전체 트리를 흐름 렌더(배경 그림만 절대배치로 빼고 스킵). 예전엔 첫 표 하나만 그려
   //   나머지 표·평문이 통째로 드롭됐다(텍스트 46.5%만 렌더).
-  const t = tables.length === 1 ? tables[0]! : null;
+  // ⚠ 단일 표라도 **셀 안에 그림**이 있으면 텍스트-전용 경로(getCell* 문단값)는 그림을 떨군다.
+  //   → 전체 트리 흐름 렌더 경로로 보내 셀 그림까지 그린다(배경 그림만 스킵).
+  const hasImg = (n: TNode): boolean => n.type === "Image" || (n.children ?? []).some(hasImg);
+  const t = tables.length === 1 && !hasImg(tables[0]!) ? tables[0]! : null;
   if (t && typeof t.ci === "number") {
     // 가로 내용영역 = 글 있는 TextLine bbox 의 중앙값(셀 안 실제 글 영역).
     const xs: number[] = [], rs: number[] = [];
