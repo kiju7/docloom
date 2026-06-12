@@ -37,6 +37,29 @@ const PORT = process.env.PORT || 8080;
 const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "";
 
+// 추론(reasoning) 강도. 미설정이면 요청에서 think 를 생략(모델 기본 = 현행 품질 유지).
+//   on/true → 켬, off/false/none → 끔, low|medium|high → gpt-oss 레벨. 그 외 → 모델 기본.
+function parseThink(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "true" || s === "on") return true;
+  if (s === "false" || s === "off" || s === "none") return false;
+  if (s === "low" || s === "medium" || s === "high") return s;
+  return undefined;
+}
+const OLLAMA_THINK = parseThink(process.env.OLLAMA_THINK);
+
+// Ollama perf 메타 한 줄 로깅 — 어디서 시간이 새는지 계측.
+//   prompt=입력토큰 / gen=생성토큰(추론+답, 큼=추론지배) / tok/s / load=콜드·오프로드 신호 / total.
+function logPerf(model, perf) {
+  const ms = (ns) => (typeof ns === "number" ? Math.round(ns / 1e6) : "?");
+  const evalMs = typeof perf.evalDuration === "number" ? perf.evalDuration / 1e6 : 0;
+  const tps = typeof perf.evalCount === "number" && evalMs > 0 ? (perf.evalCount / (evalMs / 1000)).toFixed(1) : "?";
+  console.log(
+    `[compose] ${model} prompt=${perf.promptEvalCount ?? "?"}tok gen=${perf.evalCount ?? "?"}tok ${tps}tok/s ` +
+      `load=${ms(perf.loadDuration)}ms total=${ms(perf.totalDuration)}ms think=${OLLAMA_THINK ?? "(default)"}`,
+  );
+}
+
 // GET 은 브라우저 데모(정적 파일)를 같은 포트에서 함께 서빙한다(POST API 와 동일 오리진).
 // 데모는 100% 클라이언트 처리라 파일만 내려주면 된다.
 const DEMO_DIR = fileURLToPath(new URL("./demo", import.meta.url));
@@ -157,25 +180,50 @@ createServer(async (req, res) => {
       return res.end(Buffer.from(decode(html, manifest)));
     }
     if (path === "/compose") {
-      // { doc(base64), material, name } → 서버가 Ollama 로 채움 → { doc(base64), preview, meta }
+      // { doc(base64), material, name } → 서버가 Ollama 로 채움 → { doc(base64), meta }
+      // Accept: text/event-stream 이면 SSE 로 진행(progress)을 흘리고 done 에 결과를 싣는다(체감 반응성↑).
+      // 그 외(기존 클라이언트)는 단발 JSON 응답으로 폴백 — 계약 호환.
       const { doc, material, name } = JSON.parse(body.toString("utf8"));
       if (!doc || !material) throw new Error("doc, material 이 필요합니다.");
       const bytes = new Uint8Array(Buffer.from(doc, "base64"));
       const fmt = name ? formatFromFilename(name) : undefined;
-      const llm = createOllamaClient({ endpoint: OLLAMA_HOST });
-      const model = await pickModel(llm);
-      // structuredFill: 빈 칸/값 칸에 항목(라벨·열헤더)을 붙여 정확 배치 + 기채움 값 교체.
-      // (hwp 는 자체 rhwp 경로가 같은 구조화 채움을 쓰고, pdf 는 별도 경로라 strategy 무관.)
-      const deps = { llm, model, format: fmt, strategy: structuredFill };
-      // .hwp 는 rhwp 로 표 셀까지 채운다(결과는 HWPX). 로드 실패 시 순수 TS 경로로 폴백.
-      if (fmt === "hwp") {
-        try { deps.HwpDocument = await loadHwpCtor(); }
-        catch (e) { console.error("[compose] rhwp 로드 실패 — 순수 TS 경로 사용:", e?.message ?? e); }
+      const sse = (req.headers.accept || "").includes("text/event-stream");
+      if (sse) {
+        res.setHeader("content-type", "text/event-stream; charset=utf-8");
+        res.setHeader("cache-control", "no-cache");
+        res.setHeader("connection", "keep-alive");
+        res.flushHeaders?.();
       }
-      const { bytes: out, meta } = await composeDocument(bytes, material, deps);
-      // 미리보기는 클라이언트가 렌더한다(특히 hwp 는 rhwp 라야 한글 정상). 서버는 결과 바이트만.
-      res.setHeader("content-type", "application/json");
-      return res.end(JSON.stringify({ doc: Buffer.from(out).toString("base64"), meta: { ...meta, model } }));
+      const sendEvent = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      try {
+        let resolvedModel = "";
+        const llm = createOllamaClient({
+          endpoint: OLLAMA_HOST,
+          think: OLLAMA_THINK,
+          onProgress: sse ? (ev) => sendEvent("progress", ev) : undefined,
+          onPerf: (perf) => logPerf(resolvedModel, perf),
+        });
+        const model = await pickModel(llm);
+        resolvedModel = model;
+        // structuredFill: 빈 칸/값 칸에 항목(라벨·열헤더)을 붙여 정확 배치 + 기채움 값 교체.
+        // (hwp 는 자체 rhwp 경로가 같은 구조화 채움을 쓰고, pdf 는 별도 경로라 strategy 무관.)
+        const deps = { llm, model, format: fmt, strategy: structuredFill };
+        // .hwp 는 rhwp 로 표 셀까지 채운다(결과는 HWPX). 로드 실패 시 순수 TS 경로로 폴백.
+        if (fmt === "hwp") {
+          try { deps.HwpDocument = await loadHwpCtor(); }
+          catch (e) { console.error("[compose] rhwp 로드 실패 — 순수 TS 경로 사용:", e?.message ?? e); }
+        }
+        const { bytes: out, meta } = await composeDocument(bytes, material, deps);
+        // 미리보기는 클라이언트가 렌더한다(특히 hwp 는 rhwp 라야 한글 정상). 서버는 결과 바이트만.
+        const payload = { doc: Buffer.from(out).toString("base64"), meta: { ...meta, model } };
+        if (sse) { sendEvent("done", payload); return res.end(); }
+        res.setHeader("content-type", "application/json");
+        return res.end(JSON.stringify(payload));
+      } catch (e) {
+        // SSE 는 이미 200 헤더가 나갔으니 error 이벤트로 알리고 닫는다(바깥 catch 의 500 은 못 씀).
+        if (sse) { sendEvent("error", { message: String(e?.message ?? e) }); return res.end(); }
+        throw e;
+      }
     }
     res.statusCode = 404;
     res.end("unknown route");

@@ -97,4 +97,4 @@ export type {
 } from "./compose/index.js";
 export type { FillStrategy, FillResult, LlmClient, TemplateDescriptor, Slot, RepeatGroup } from "./compose/types.js";
 export { createOllamaClient } from "./llm/ollama.js";
-export type { OllamaOptions } from "./llm/ollama.js";
+export type { OllamaOptions, ThinkLevel, OllamaPerf, OllamaProgress } from "./llm/ollama.js";
