@@ -1107,6 +1107,7 @@ interface TreeCtx {
   fnCount: { n: number }; // 각주 마커(FnMarker) 일련번호(문서 전역 공유) — rhwp 가 번호를 안 줘서 순번 부여
   hwpxHfLines: { header?: { color: string; w: number }; footer?: { color: string; w: number } }; // hwpx 머리말/꼬리말 구분선
   fnSep?: { w: number; color: string; thick: number }; // 각주 구분선 스타일(footnoteArea 흐름 블록 위에 깐다)
+  imgCanon?: Set<string> | null; // 실제 그림의 최종 위치 "x,y"(컨트롤 식별자 dedup) — 그 외 위치는 stepping 아티팩트
 }
 
 /**
@@ -1115,26 +1116,35 @@ interface TreeCtx {
  * renderPageHtml 은 rhwp 가 그림 컨트롤→binItemID→스트림을 정확히 해석해 임베드하므로, 그
  * <img> 위치(left/top)를 트리 Image 노드 bbox 와 맞추면 각 노드의 **정답 바이트**를 얻는다.
  */
-function buildPageImages(doc: RhwpDoc, pg: number): PageImg[] {
+function buildPageImages(doc: RhwpDoc, pg: number): { imgs: PageImg[]; canon: Set<string> | null } {
   // 1순위: getPageControlLayout 의 image 컨트롤 → getControlImageData(**컨트롤별 정확 바이트**, bbox 동봉).
-  //   renderPageHtml 이 그림을 0개 내는 복잡 레이아웃 페이지에서도, BinData 이름순 풀(순서 어긋남)을
-  //   거치지 않고 컨트롤 좌표에 맞는 정답 바이트를 얻는다(이미지 순서/추출 문제 해결).
+  //   ⚠ rhwp 는 한 그림을 stepping 좌표로 여러 번(격자처럼) 토한다. **고유 식별자
+  //   (secIdx,paraIdx,controlIdx)** 가 진짜 그림 1개를 가리키므로 그걸로 중복 제거하고, 같은
+  //   식별자의 **마지막 occurrence = 최종 안착 위치**를 채택한다(stepping 은 최종 위치로 수렴).
+  //   canon = 채택된 위치들의 "x,y" 집합 → 렌더 단계가 비-정규(아티팩트) 그림 노드를 스킵하는 근거.
   if (doc.getPageControlLayout && doc.getControlImageData) {
     const cl = pj<{ controls?: any[] }>(safe(() => doc.getPageControlLayout!(pg)));
-    const out: PageImg[] = [];
+    const byId = new Map<string, any>();
     for (const c of (cl?.controls ?? [])) {
-      if (c?.type !== "image" || typeof c.x !== "number" || typeof c.y !== "number") continue;
+      if (c?.type === "image" && typeof c.x === "number" && typeof c.y === "number") {
+        byId.set(`${c.secIdx},${c.paraIdx},${c.controlIdx}`, c); // 마지막이 남는다(최종 위치)
+      }
+    }
+    const out: PageImg[] = [];
+    const canon = new Set<string>();
+    for (const c of byId.values()) {
+      canon.add(`${Math.round(c.x)},${Math.round(c.y)}`);
       const data = safe(() => doc.getControlImageData!(c.secIdx, c.paraIdx, c.controlIdx));
       if (!data || !data.length) continue;
       if (data.length > MAX_IMG_BYTES) { out.push({ x: c.x, y: c.y, src: TRANSPARENT_PX, used: false }); continue; } // 과대 이미지 → 자리표시자
       const mime = (doc.getControlImageMime && safe(() => doc.getControlImageMime!(c.secIdx, c.paraIdx, c.controlIdx))) || "image/png";
       out.push({ x: c.x, y: c.y, src: `data:${mime};base64,${bytesToBase64(data)}`, used: false });
     }
-    if (out.length) return out;
+    if (canon.size) return { imgs: out, canon };
   }
-  // 2순위(폴백): renderPageHtml 의 <img>(rhwp 가 binItemID 로 임베드한 것).
+  // 2순위(폴백): renderPageHtml 의 <img>(rhwp 가 binItemID 로 임베드한 것). 식별자 없음 → canon=null(게이트 안 함).
   const html = doc.renderPageHtml ? safe(() => doc.renderPageHtml!(pg)) : undefined;
-  if (!html) return [];
+  if (!html) return { imgs: [], canon: null };
   const out: PageImg[] = [];
   for (const m of html.matchAll(/<img\b[^>]*>/g)) {
     const tag = m[0];
@@ -1143,7 +1153,7 @@ function buildPageImages(doc: RhwpDoc, pg: number): PageImg[] {
     const y = Number(tag.match(/top:(-?[\d.]+)px/)?.[1]);
     if (src && isFinite(x) && isFinite(y)) out.push({ x, y, src, used: false });
   }
-  return out;
+  return { imgs: out, canon: null };
 }
 
 /**
@@ -1186,6 +1196,15 @@ const MAX_IMG_B64 = Math.ceil(MAX_IMG_BYTES / 3) * 4 + 64;
  *      므로 풀에서 엉뚱한 바이트를 빌리지 않고 ③ 투명 자리표시자로 둔다.
  *   ③ 투명 1×1 자리표시자(드롭 금지). 어느 경우든 <img> 는 항상 1개 나간다.
  */
+/** rhwp 가 같은 그림을 페이지 폭 밖으로 stepping 격자처럼 토하는 아티팩트 판정.
+ *  정상 문서 그림은 용지 안에 들어온다 — 오른쪽 끝을 8px 넘게 삐져나오거나 시작점이
+ *  용지 밖이면 아티팩트로 보고 스킵(겹침·여백오염 방지). pageW 없으면 보수적으로 통과. */
+/** 그림 노드가 rhwp stepping 아티팩트(같은 컨트롤의 비-최종 위치 복사본)인가 — 컨트롤
+ *  레이아웃 기반 canon(최종 위치 집합)에 없으면 아티팩트. canon 이 없으면(폴백) 판정 안 함. */
+function isArtifactImg(b: { x: number; y: number } | undefined, ctx: TreeCtx): boolean {
+  return !!b && !!ctx.imgCanon && !ctx.imgCanon.has(`${Math.round(b.x)},${Math.round(b.y)}`);
+}
+
 function imageSrcFor(node: TNode, ctx: TreeCtx): string {
   const b = node.bbox;
   if (b) {
@@ -1500,6 +1519,7 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
     }
     case "Image": {
       if (ctx.skipImage && node === ctx.skipImage) return ""; // 쪽배경 그림은 절대배치로 따로 그림
+      if (isArtifactImg(node.bbox, ctx)) return ""; // rhwp stepping 아티팩트(비-최종 위치 복사본) → 스킵
       if (node.bbox && ctx.overlayPos.has(`${Math.round(node.bbox.x)},${Math.round(node.bbox.y)}`)) return ""; // 오버레이(도장·서명)
       const uri = imageSrcFor(node, ctx); // 위치(bbox) 매칭 → 정답 바이트(폴백: 풀)
       if (!uri) return "";
@@ -1548,6 +1568,7 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
           }
           if (c.type === "Image") {
             const b = c.bbox;
+            if (isArtifactImg(b, ctx)) return ""; // rhwp stepping 아티팩트(비-최종 위치 복사본) → 스킵
             if (b && ctx.overlayPos.has(`${Math.round(b.x)},${Math.round(b.y)}`)) return ""; // 오버레이(도장·서명)는 절대배치로 따로
             const uri = imageSrcFor(c, ctx);
             if (!uri) return "";
@@ -1617,18 +1638,6 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
           .map((c) => `<div class="hp-band">${renderTreeNode(c, ctx, false, { x: fullX, w: fullW })}</div>`).join("");
         const colHtml = (col: TNode) =>
           (col.children ?? []).filter((c) => !isWide(col, c)).map((c) => renderTreeNode(c, ctx, false, { x: col.bbox!.x, w: col.bbox!.w })).join("");
-        // 다단 셀 내부는 **절대좌표 배치**(rhwp 데모처럼) — 흐름이면 텍스트 reflow 누적으로 이미지가 튄다.
-        // 각 자식(줄·그림·표)을 컬럼 기준 bbox 좌표에 박아 드리프트 없이 원본 위치 보존.
-        const colHtmlAbs = (col: TNode) => {
-          const cx = col.bbox!.x, cy = col.bbox!.y;
-          return (col.children ?? []).filter((c) => !isWide(col, c)).map((c) => {
-            const inner = renderTreeNode(c, ctx, false, { x: col.bbox!.x, w: col.bbox!.w });
-            if (!inner) return "";
-            return c.bbox
-              ? `<div class="hp-colabs" style="left:${Math.round(c.bbox.x - cx)}px;top:${Math.round(c.bbox.y - cy)}px;width:${Math.round(c.bbox.w)}px">${inner}</div>`
-              : inner;
-          }).join("");
-        };
         // y 가 비슷한(같은 밴드) 단끼리 묶는다.
         const sorted = [...colKids].sort((a, b) => (a.bbox!.y - b.bbox!.y) || (a.bbox!.x - b.bbox!.x));
         const bands: TNode[][] = [];
@@ -1644,7 +1653,7 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
             const next = ordered[i + 1];
             const gap = next ? Math.max(0, Math.round(next.bbox!.x - (col.bbox!.x + col.bbox!.w))) : 0;
             const mr = gap ? `;margin-right:${gap}px` : "";
-            return `<div class="hp-colcell" style="position:relative;width:${Math.round(col.bbox!.w)}px;height:${Math.round(col.bbox!.h)}px${mr}">${colHtmlAbs(col)}</div>`;
+            return `<div class="hp-colcell" style="width:${Math.round(col.bbox!.w)}px${mr}">${colHtml(col)}</div>`;
           }).join("");
           return `<div class="hp-cols">${cells}</div>`;
         }).join("");
@@ -1926,11 +1935,12 @@ export function hwpToTreePreviewHtml(
     const tree = pj<TNode>(safe(() => doc.getPageRenderTree!(pg)));
     if (!tree) continue;
     const overlay = renderOverlayImages(doc, pg); // 도장·서명 등(절대배치) + 흐름 스킵 위치
+    const pageImages = buildPageImages(doc, pg);
     const ctx: TreeCtx = {
-      doc, styles: buildRunStyles(doc, pg, hwpxSup, hwpxSub), leadX: buildRunLeadX(doc, pg), pageImgs: buildPageImages(doc, pg),
+      doc, styles: buildRunStyles(doc, pg, hwpxSup, hwpxSub), leadX: buildRunLeadX(doc, pg), pageImgs: pageImages.imgs,
       cellBgs: buildCellBgs(doc, pg), pool, cur, sec: 0, pageW, pageH, bgLayers: [],
       linePitch: buildLinePitch(tree), imgSeen: [], hwpxFills, fnCount, hwpxHfLines, fnSep: buildFnSep(doc, pg),
-      overlayPos: overlay.pos,
+      overlayPos: overlay.pos, imgCanon: pageImages.canon,
     };
     // 쪽배경(상장 테두리 등) 페이지 → 실제 문단값으로 흐름배치. 그 외 → 일반 흐름배치.
     const bg = findFullPageBg(tree, pageW, pageH);
@@ -1981,7 +1991,6 @@ export function hwpToTreePreviewHtml(
   /* 다단(多段): 전체폭 밴드(흐름) + 좁은 단 묶음(flex 좌우 병렬). y 순으로 흐름배치 → 겹침 없음. */
   .hp-cols{display:flex;align-items:flex-start}
   .hp-colcell{overflow-wrap:anywhere}
-  .hp-colabs{position:absolute}
   /* 각주 영역 — 본문과 사이 여백 + 구분선 아래 각주 글자(흐름). */
   .hp-fnarea{margin-top:14px}
   .hp-fn-sep{margin-bottom:3px}
