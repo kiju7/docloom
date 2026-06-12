@@ -1843,8 +1843,11 @@ export function hwpToTreePreviewHtml(
 ): string {
   const n = doc.pageCount && doc.getPageRenderTree ? safe(() => doc.pageCount!()) ?? 0 : 0;
   const pageDef = doc.getPageDef ? pj<any>(safe(() => doc.getPageDef!(0))) : null;
-  const pageW = pageDef && pageDef.width ? hu2px(pageDef.width) : 794;
-  const pageH = pageDef && pageDef.height ? hu2px(pageDef.height) : 1123;
+  // getPageDef 는 width/height 를 **세로(portrait) 기준**으로 주고 landscape 플래그만 따로 준다.
+  // 가로 문서는 스왑해야 본문(넓은 표 등)이 안 잘린다(렌더트리 좌표는 이미 가로 기준).
+  const land = !!pageDef?.landscape;
+  const pageW = pageDef && pageDef.width ? hu2px(land ? pageDef.height : pageDef.width) : 794;
+  const pageH = pageDef && pageDef.height ? hu2px(land ? pageDef.width : pageDef.height) : 1123;
   const mL = hu2px(pageDef?.marginLeft ?? 0), mR = hu2px(pageDef?.marginRight ?? 0);
   const pad = pageDef
     ? `${hu2px(pageDef.marginTop ?? 0)}px ${mR}px ${hu2px(pageDef.marginBottom ?? 0)}px ${mL}px`
