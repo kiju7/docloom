@@ -170,21 +170,29 @@ function frozenBlock(el: HTMLElement): string {
 
 function cleanTable(el: HTMLElement, ctx: Ctx): string {
   const styleKey = tryStyleKeyFromClass(ctx.palette, el.getAttribute("class")) ?? ctx.palette.fallbackStyleKey;
+  // 편집 가능 표의 원본 복원 토큰 — decode 가 셀을 원본 표에 갈아끼우는 데 필요(보존).
+  const dataTable = el.getAttribute("data-table");
   const rows = el.querySelectorAll("tr").map((tr) => {
     const cells = tr.querySelectorAll("td,th").map((cell) => {
       countStyle(cell, ctx);
       const cKey = tryStyleKeyFromClass(ctx.palette, cell.getAttribute("class")) ?? ctx.palette.fallbackStyleKey;
       const colspan = cell.getAttribute("colspan");
       const rowspan = cell.getAttribute("rowspan");
+      // data-cell(셀 식별자)·data-ro(읽기전용)는 보존 — 편집 가능 표 셀의 왕복 ref.
+      const dataCell = cell.getAttribute("data-cell");
+      const dataRo = cell.getAttribute("data-ro");
       const attrs =
         ` class="${classFromStyleKey(cKey)}"` +
+        (dataCell ? ` data-cell="${escapeAttr(dataCell)}"` : "") +
+        (dataRo !== null ? ` data-ro="${escapeAttr(dataRo ?? "")}"` : "") +
         (colspan ? ` colspan="${escapeAttr(colspan)}"` : "") +
         (rowspan ? ` rowspan="${escapeAttr(rowspan)}"` : "");
       return `<td${attrs}>${serializeInline(cell, ctx)}</td>`;
     });
     return `<tr>${cells.join("")}</tr>`;
   });
-  return `<table class="${classFromStyleKey(styleKey)}"><tbody>${rows.join("")}</tbody></table>`;
+  const dtAttr = dataTable ? ` data-table="${escapeAttr(dataTable)}"` : "";
+  return `<table class="${classFromStyleKey(styleKey)}"${dtAttr}><tbody>${rows.join("")}</tbody></table>`;
 }
 
 // ── 인라인 정규화 ────────────────────────────────────────────────────────

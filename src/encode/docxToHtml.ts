@@ -46,6 +46,12 @@ export interface EncodeOptions {
    * 미리보기 전용. 왕복(decode)에는 사용하지 말 것 — 표는 frozen 보존이 원칙.
    */
   expandTables?: boolean;
+  /**
+   * true 면 표를 '편집 가능 표'로 인코딩한다(xlsx 방식): 원본 w:tbl 은 manifest.frozen 에 보존,
+   * HTML 엔 <table data-table> + <td data-cell> 로 셀 텍스트만 노출. decode 가 바뀐 셀만
+   * 원본에 갈아끼워 테두리·셀폭·병합 등 서식을 보존하면서 셀 채움을 가능케 한다.
+   */
+  editableTables?: boolean;
 }
 
 export interface EncodeResult {
@@ -78,10 +84,14 @@ export function encodeToHtml(docx: Uint8Array, opts: EncodeOptions = {}): Encode
   const store: PropStore = { props: {}, pSeq: 0, rSeq: 0, frozen, frunSeq: 0 };
   let frozenSeq = 0;
 
+  let tblSeq = 0;
   for (const node of content) {
     const tag = tagOf(node);
     if (tag === "w:p") {
       blocks.push(paragraphNodeToBlock(node, palette, store));
+    } else if (tag === "w:tbl" && opts.editableTables) {
+      // 편집 가능 표: 원본 보존 + 셀 텍스트만 data-cell 로 노출(왕복 가능).
+      blocks.push(tableNodeToEditableBlock(node, palette, store, tblSeq++));
     } else if (tag === "w:tbl" && opts.expandTables) {
       // 미리보기 전용: 표를 HTML <table> 로 펼친다 (왕복 아님).
       blocks.push(tableNodeToBlock(node, palette, store));
@@ -172,6 +182,45 @@ function tableNodeToBlock(node: XmlNode, palette: Palette, store: PropStore): Ta
   return { type: "table", styleKey: palette.fallbackStyleKey, rows };
 }
 
+/**
+ * w:tbl → 편집 가능 Table 블록. 원본 표 XML 은 store.frozen[tbl-N] 에 통째 보존하고,
+ * 각 셀엔 cellRef(data-cell="tbl-N:row:col")+평문 텍스트만 담는다. decode 가 바뀐 셀만
+ * 원본에 갈아끼우므로 테두리·셀폭·병합 등 모든 서식이 유지된다.
+ */
+function tableNodeToEditableBlock(node: XmlNode, palette: Palette, store: PropStore, tblIdx: number): Table {
+  const sourceRef = `tbl-${tblIdx}`;
+  store.frozen[sourceRef] = buildXml([node]);
+  const rows: TableRow[] = [];
+  findChildren(childrenOf(node), "w:tr").forEach((tr, r) => {
+    const cells: TableCell[] = [];
+    findChildren(childrenOf(tr), "w:tc").forEach((tc, c) => {
+      const tcPr = findChild(childrenOf(tc), "w:tcPr");
+      let colSpan: number | undefined;
+      if (tcPr) {
+        const gs = findChild(childrenOf(tcPr), "w:gridSpan");
+        const n = gs ? Number(attrOf(gs, "w:val")) : NaN;
+        if (Number.isFinite(n) && n > 1) colSpan = n;
+      }
+      cells.push({
+        styleKey: palette.fallbackStyleKey,
+        blocks: [],
+        cellRef: `${sourceRef}:${r}:${c}`,
+        text: docxCellText(tc),
+        colSpan,
+      });
+    });
+    rows.push({ cells });
+  });
+  return { type: "table", styleKey: palette.fallbackStyleKey, rows, sourceRef };
+}
+
+/** w:tc 안 모든 w:p 의 텍스트를 줄바꿈으로 이어 평문으로. */
+function docxCellText(tc: XmlNode): string {
+  return findChildren(childrenOf(tc), "w:p")
+    .map((p) => readRuns(p).map((r) => r.text).join(""))
+    .join("\n");
+}
+
 function frozenLabel(tag: string): string {
   if (tag === "w:tbl") return "[표]";
   return `[보존된 원본 요소: ${tag}]`;
@@ -251,17 +300,20 @@ function serializeTable(block: Extract<Block, { type: "table" }>, palette: Palet
   const rows = block.rows
     .map((row) => {
       const cells = row.cells
-        .map(
-          (c) =>
-            `<td class="${classFromStyleKey(c.styleKey)}"${c.colSpan ? ` colspan="${c.colSpan}"` : ""}${
-              c.rowSpan ? ` rowspan="${c.rowSpan}"` : ""
-            }>${c.blocks.map((b) => serializeBlock(b, palette)).join("")}</td>`,
-        )
+        .map((c) => {
+          const span = `${c.colSpan ? ` colspan="${c.colSpan}"` : ""}${c.rowSpan ? ` rowspan="${c.rowSpan}"` : ""}`;
+          // 편집 가능 셀: data-cell + 평문 텍스트(빈 셀은 빈 내용 → 채울 슬롯).
+          if (c.cellRef !== undefined) {
+            return `<td class="${classFromStyleKey(c.styleKey)}" data-cell="${c.cellRef}"${span}>${escapeHtml(c.text ?? "").replace(/\n/g, "<br/>")}</td>`;
+          }
+          return `<td class="${classFromStyleKey(c.styleKey)}"${span}>${c.blocks.map((b) => serializeBlock(b, palette)).join("")}</td>`;
+        })
         .join("");
       return `<tr>${cells}</tr>`;
     })
     .join("");
-  return `<table class="${classFromStyleKey(block.styleKey)}"><tbody>${rows}</tbody></table>`;
+  const dataTable = block.sourceRef ? ` data-table="${block.sourceRef}"` : "";
+  return `<table class="${classFromStyleKey(block.styleKey)}"${dataTable}><tbody>${rows}</tbody></table>`;
 }
 
 function escapeHtml(s: string): string {

@@ -41,8 +41,8 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@rhwp/core": "^0.7.13",
-    "@rhwp/editor": "^0.7.13",
+    "@rhwp/core": "^0.7.15",
+    "@rhwp/editor": "^0.7.15",
     "fast-xml-parser": "^4.5.0",
     "fflate": "^0.8.2",
     "node-html-parser": "^6.1.13",

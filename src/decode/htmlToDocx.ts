@@ -86,10 +86,91 @@ function blockToNodes(block: Block, manifest: Manifest, palette: Palette): XmlNo
       if (xml === undefined) throw new Error(`frozen 원본 누락: ${block.refId}`);
       return parseXml(xml);
     }
-    case "table":
-      // v0: 표 재생성 미구현. 보통 표는 frozen 으로 보존되므로 여기 도달하지 않음.
-      throw new Error("table 블록의 docx 재생성은 아직 미구현 (현재 표는 frozen 으로 보존)");
+    case "table": {
+      // 편집 가능 표: 원본 w:tbl(manifest.frozen[sourceRef])을 가져와 바뀐 셀 텍스트만 갈아끼운다.
+      // sourceRef 가 없으면 미리보기용 expandTables 표 → 왕복 불가(원칙상 도달 안 함).
+      if (!block.sourceRef) {
+        throw new Error("table 블록 재생성 불가: sourceRef 없음(미리보기 expandTables 표는 왕복 대상이 아님)");
+      }
+      const xml = manifest.frozen[block.sourceRef];
+      if (xml === undefined) throw new Error(`표 원본 누락: ${block.sourceRef}`);
+      const tbl = parseXml(xml).find((n) => tagOf(n) === "w:tbl");
+      if (!tbl) throw new Error(`표 원본에 w:tbl 없음: ${block.sourceRef}`);
+      patchTableCells(tbl, block);
+      return [tbl];
+    }
   }
+}
+
+/** 편집된 셀 텍스트를 원본 w:tbl 에 반영(바뀐 셀만 — 미변경 셀은 원본 그대로 보존). */
+function patchTableCells(tbl: XmlNode, block: Extract<Block, { type: "table" }>): void {
+  const trs = childrenOf(tbl).filter((n) => tagOf(n) === "w:tr");
+  block.rows.forEach((row, r) => {
+    const tr = trs[r];
+    if (!tr) return;
+    const tcs = childrenOf(tr).filter((n) => tagOf(n) === "w:tc");
+    row.cells.forEach((cell, c) => {
+      const tc = tcs[c];
+      if (!tc || cell.cellRef === undefined) return;
+      const next = cell.text ?? "";
+      if (next === docxCellText(tc)) return; // 변경 없음 → 원본 셀(서식·구조) 그대로
+      setDocxCellText(tc, next);
+    });
+  });
+}
+
+/** w:tc 안 모든 w:p 텍스트를 줄바꿈으로 이어 평문으로(encode 측과 동일 규칙). */
+function docxCellText(tc: XmlNode): string {
+  return childrenOf(tc)
+    .filter((n) => tagOf(n) === "w:p")
+    .map((p) =>
+      childrenOf(p)
+        .filter((n) => tagOf(n) === "w:r")
+        .flatMap((rn) => childrenOf(rn).filter((n) => tagOf(n) === "w:t"))
+        .map((t) => textOf(childrenOf(t)[0] ?? {}) ?? "")
+        .join(""),
+    )
+    .join("\n");
+}
+
+/** 셀 텍스트 교체: 첫 w:p 의 w:pPr 는 유지하고 본문을 새 텍스트 한 런으로 대체(w:tcPr 보존). */
+function setDocxCellText(tc: XmlNode, text: string): void {
+  const kids = childrenOf(tc);
+  const tcPr = kids.find((n) => tagOf(n) === "w:tcPr");
+  const firstP = kids.find((n) => tagOf(n) === "w:p");
+  const pPr = firstP ? childrenOf(firstP).find((n) => tagOf(n) === "w:pPr") : undefined;
+  const runNode: XmlNode = {
+    "w:r": [{ "w:t": [{ "#text": text }], ":@": { "@_xml:space": "preserve" } }],
+  } as unknown as XmlNode;
+  const newP: XmlNode = { "w:p": pPr ? [pPr, runNode] : [runNode] } as unknown as XmlNode;
+  setChildren(tc, tcPr ? [tcPr, newP] : [newP]);
+}
+
+/** <table data-table> + <td data-cell> → 편집 가능 Table 블록(원본 복원은 decode 가 sourceRef 로). */
+function parseTableToBlock(node: XmlNode, palette: Palette): Block {
+  const sourceRef = attrOf(node, "data-table");
+  const styleKey = styleKeyFromClass(palette, attrOf(node, "class"));
+  const tbody = childrenOf(node).find((n) => tagOf(n) === "tbody") ?? node;
+  const rows = childrenOf(tbody)
+    .filter((n) => tagOf(n) === "tr")
+    .map((tr) => ({
+      cells: childrenOf(tr)
+        .filter((n) => tagOf(n) === "td" || tagOf(n) === "th")
+        .map((td) => {
+          const cell: import("../model/docModel.js").TableCell = {
+            styleKey: styleKeyFromClass(palette, attrOf(td, "class")),
+            blocks: [],
+            cellRef: attrOf(td, "data-cell"),
+            text: readHtmlRuns(td).map((r) => r.text).join(""),
+          };
+          const cs = Number(attrOf(td, "colspan"));
+          const rs = Number(attrOf(td, "rowspan"));
+          if (Number.isFinite(cs) && cs > 1) cell.colSpan = cs;
+          if (Number.isFinite(rs) && rs > 1) cell.rowSpan = rs;
+          return cell;
+        }),
+    }));
+  return { type: "table", styleKey, rows, sourceRef };
 }
 
 function runsToRaw(runs: Run[], manifest: Manifest): RawRun[] {
@@ -120,6 +201,11 @@ export function parseHtmlToModel(html: string, palette: Palette): DocModel {
 
     if (tag === "div" && attrOf(node, "data-frozen") !== undefined) {
       blocks.push({ type: "frozen", refId: attrOf(node, "data-frozen")!, label: textOf(childrenOf(node)[0] ?? {}) });
+      continue;
+    }
+
+    if (tag === "table") {
+      blocks.push(parseTableToBlock(node, palette));
       continue;
     }
 

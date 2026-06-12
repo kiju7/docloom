@@ -638,15 +638,35 @@ function renderRhwpTable(doc: RhwpDoc, s: number, p: number, t: TableRef, opts: 
     });
   }
 
-  // 열 너비(colSpan==1 셀 기준) → colgroup
+  // 열 너비 → colgroup. ① colSpan==1 셀이 정확한 열 너비를 준다.
   const colW = new Array(Math.max(t.cols, 1)).fill(0);
   for (const c of cells) {
     if (c.colSpan === 1 && c.col < colW.length && typeof c.props?.width === "number") {
       colW[c.col] = Math.max(colW[c.col], hu2px(c.props.width));
     }
   }
+  // ② 병합셀(colSpan>1)의 너비를, 아직 너비가 없는 열들에 균등 분배(이미 아는 열은 빼고).
+  //    → 병합셀만 걸친 열이 40px 로 쪼그라드는 문제 해소.
+  for (const c of cells) {
+    if (c.colSpan > 1 && typeof c.props?.width === "number") {
+      const empty = [];
+      let known = 0;
+      for (let k = c.col; k < c.col + c.colSpan && k < colW.length; k++) {
+        if (colW[k] > 0) known += colW[k];
+        else empty.push(k);
+      }
+      if (empty.length) {
+        const each = Math.max(24, Math.round((hu2px(c.props.width) - known) / empty.length));
+        for (const k of empty) colW[k] = each;
+      }
+    }
+  }
+  // ③ 그래도 0 인 열은 알려진 열들의 평균(없으면 80)으로 채워, colgroup 합과 표 폭을 일치시킨다.
+  const knownW = colW.filter((w) => w > 0);
+  const avgW = knownW.length ? Math.round(knownW.reduce((a, b) => a + b, 0) / knownW.length) : 80;
+  for (let i = 0; i < colW.length; i++) if (!colW[i]) colW[i] = Math.max(40, avgW);
   const totalW = colW.reduce((a, b) => a + b, 0);
-  const colgroup = totalW > 0 ? `<colgroup>${colW.map((w) => `<col style="width:${w || 40}px">`).join("")}</colgroup>` : "";
+  const colgroup = totalW > 0 ? `<colgroup>${colW.map((w) => `<col style="width:${w}px">`).join("")}</colgroup>` : "";
 
   // 시작 행 기준으로 묶고 열순 정렬(rowspan 은 브라우저가 자동 흘림)
   const byRow = new Map<number, GridCell[]>();
@@ -1779,15 +1799,34 @@ function renderTreeTable(node: TNode, ctx: TreeCtx, topLevel: boolean): string {
 
 /** 그리드 셀 배열 → <table> HTML(병합/열너비 처리). renderRhwpTable 의 조립부와 동일 규칙. */
 function assembleTreeTable(cells: GridCell[], cols: number, topLevel: boolean): string {
+  // 열 너비: ① colSpan==1 셀이 정확값 → ② 병합셀 너비를 빈 열에 분배 → ③ 남은 0 은 평균으로.
+  //   (colgroup 합과 표 폭을 일치시켜 표가 쪼그라들거나 간격이 틀어지지 않게 한다.)
   const colW = new Array(Math.max(cols, 1)).fill(0);
   for (const c of cells) {
     if (c.colSpan === 1 && c.col < colW.length && typeof c.props?.width === "number") {
       colW[c.col] = Math.max(colW[c.col], hu2px(c.props.width));
     }
   }
+  for (const c of cells) {
+    if (c.colSpan > 1 && typeof c.props?.width === "number") {
+      const empty: number[] = [];
+      let known = 0;
+      for (let k = c.col; k < c.col + c.colSpan && k < colW.length; k++) {
+        if (colW[k] > 0) known += colW[k];
+        else empty.push(k);
+      }
+      if (empty.length) {
+        const each = Math.max(24, Math.round((hu2px(c.props.width) - known) / empty.length));
+        for (const k of empty) colW[k] = each;
+      }
+    }
+  }
+  const knownW = colW.filter((w) => w > 0);
+  const avgW = knownW.length ? Math.round(knownW.reduce((a, b) => a + b, 0) / knownW.length) : 80;
+  for (let i = 0; i < colW.length; i++) if (!colW[i]) colW[i] = Math.max(40, avgW);
   const totalW = colW.reduce((a, b) => a + b, 0);
   const colgroup = totalW > 0
-    ? `<colgroup>${colW.map((w) => `<col style="width:${w || 40}px">`).join("")}</colgroup>` : "";
+    ? `<colgroup>${colW.map((w) => `<col style="width:${w}px">`).join("")}</colgroup>` : "";
   const byRow = new Map<number, GridCell[]>();
   for (const c of cells) {
     if (!byRow.has(c.row)) byRow.set(c.row, []);

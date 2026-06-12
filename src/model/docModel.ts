@@ -70,6 +70,13 @@ export interface TableCell {
   /** 가로/세로 병합 정보 — v0 에서는 보존만, 편집은 막는다 */
   colSpan?: number;
   rowSpan?: number;
+  /**
+   * 편집 가능 표(editableTables) 의 셀 식별자(data-cell="tbl-N:row:col").
+   * 있으면 decode 가 원본 표 XML(Table.sourceRef) 의 해당 셀 텍스트만 교체한다(서식 보존).
+   */
+  cellRef?: string;
+  /** 편집 가능 표 셀의 평문 텍스트(편집 표면에 노출/되읽기되는 값). */
+  text?: string;
 }
 
 export interface TableRow {
@@ -79,6 +86,12 @@ export interface TableRow {
 export interface Table extends BlockBase {
   type: "table";
   rows: TableRow[];
+  /**
+   * 편집 가능 표면 원본 표 XML 토큰(Manifest.frozen[sourceRef] = 원본 w:tbl/hp:tbl).
+   * 있으면 decode 는 표를 새로 짓지 않고, 원본을 가져와 cellRef 가 가리키는 셀 텍스트만
+   * 갈아끼운다 → 테두리·셀폭·병합 등 모든 서식 보존. (없으면 미리보기용 expandTables 표)
+   */
+  sourceRef?: string;
 }
 
 /**

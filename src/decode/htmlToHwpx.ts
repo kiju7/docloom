@@ -19,6 +19,7 @@ import type { Manifest } from "../model/manifest.js";
 import type { Block, Run } from "../model/docModel.js";
 import { parseHtmlToModel } from "./htmlToDocx.js";
 import { writeZip, partToText, textToPart, tryPartToText } from "../core/zip.js";
+import { findDeep, deepText, makeTextNode, childrenOf, tagOf, findChildren } from "../core/xml.js";
 import {
   HEADER_PART,
   type XmlNode,
@@ -79,7 +80,14 @@ function blockToParagraph(block: Block, manifest: Manifest, palette: Palette): X
     return makeParagraphNode(undefined, []);
   }
   if (block.type === "table") {
-    throw new Error("HWPX: table 블록 재생성 미구현 (표는 frozen 런으로 보존)");
+    // 편집 가능 표: 원본 hp:p(manifest.frozen[sourceRef]) 를 가져와 바뀐 셀의 hp:t 만 갈아끼운다.
+    if (!block.sourceRef) return makeParagraphNode(undefined, []);
+    const xml = manifest.frozen[block.sourceRef];
+    if (xml === undefined) throw new Error(`HWPX 표 원본 누락: ${block.sourceRef}`);
+    const p = parseXml(xml).find((n) => tagOf(n) === "hp:p");
+    if (!p) throw new Error(`HWPX 표 원본에 hp:p 없음: ${block.sourceRef}`);
+    patchHwpxTableCells(p, block);
+    return p;
   }
   const runs = (block.runs as Run[]).map((r) => runToNode(r, manifest));
   const attrsJson = block.propsRef ? manifest.props[block.propsRef] : undefined;
@@ -95,4 +103,38 @@ function runToNode(run: Run, manifest: Manifest): XmlNode {
   // 신규 런(propsRef 없음)은 기본 문자속성 0 으로 부여.
   const charPrRef = run.propsRef ? manifest.props[run.propsRef] : "0";
   return makeTextRunNode(run.text, charPrRef);
+}
+
+/** 편집된 셀 텍스트를 원본 hp:p 안 hp:tbl 에 반영(바뀐 셀만 — 미변경 셀·서식은 원본 보존). */
+function patchHwpxTableCells(p: XmlNode, block: Extract<Block, { type: "table" }>): void {
+  const tbl = findDeep([p], "hp:tbl");
+  if (!tbl) return;
+  const trs = findChildren(childrenOf(tbl), "hp:tr");
+  block.rows.forEach((row, r) => {
+    const tr = trs[r];
+    if (!tr) return;
+    const tcs = findChildren(childrenOf(tr), "hp:tc");
+    row.cells.forEach((cell, c) => {
+      const tc = tcs[c];
+      if (!tc || cell.cellRef === undefined) return;
+      const next = cell.text ?? "";
+      if (next === deepText(tc)) return; // 변경 없음 → 원본 셀 그대로(서식 보존)
+      setHwpxCellText(tc, next);
+    });
+  });
+}
+
+/** hp:tc 의 텍스트를 새 값으로 교체: 기존 hp:t 가 있으면 그 텍스트만, 없으면 셀 문단에 런을 만든다. */
+function setHwpxCellText(tc: XmlNode, text: string): void {
+  const tNode = findDeep(childrenOf(tc), "hp:t");
+  if (tNode) {
+    setChildren(tNode, [makeTextNode(text)]);
+    return;
+  }
+  // 빈 셀: 셀 안 hp:p(보통 hp:subList 하위)에 텍스트 런을 넣는다.
+  const cellP = findDeep(childrenOf(tc), "hp:p");
+  if (cellP) {
+    const keep = childrenOf(cellP).filter((n) => tagOf(n) !== "hp:run" && tagOf(n) !== "hp:linesegarray");
+    setChildren(cellP, [makeTextRunNode(text, "0"), ...keep]);
+  }
 }

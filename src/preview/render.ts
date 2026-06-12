@@ -483,9 +483,18 @@ function renderTable(tbl: XmlNode, ctx: Ctx): string {
       return `<tr>${tds}</tr>`;
     })
     .join("");
+  // tblGrid 의 열너비(w:gridCol)를 colgroup(퍼센트)로 반영 + table-layout:fixed →
+  // 빈 셀이 쪼그라들지 않고 원본 열 비율(라벨 좁게·값 넓게 등)을 그대로 유지한다.
+  const colW = gridDef ? findChildren(childrenOf(gridDef), "w:gridCol").map((g) => Number(attrOf(g, "w:w")) || 0) : [];
+  const totalW = colW.reduce((a, b) => a + b, 0);
+  const colgroup =
+    colW.length > 0 && totalW > 0
+      ? `<colgroup>${colW.map((w) => `<col style="width:${((w / totalW) * 100).toFixed(3)}%"/>`).join("")}</colgroup>`
+      : "";
   // 실제 테두리를 인라인으로 입힌 표는 회색 기본 테두리를 끄도록 클래스로 표시.
   const cls = hasAnyBorderSource ? "docloom-table docloom-table-bordered" : "docloom-table";
-  return `<table class="${cls}"><tbody>${rows}</tbody></table>`;
+  const tblStyle = colgroup ? ` style="table-layout:fixed"` : "";
+  return `<table class="${cls}"${tblStyle}>${colgroup}<tbody>${rows}</tbody></table>`;
 }
 
 // ── 목록(글머리기호/번호) ─────────────────────────────────────────────────

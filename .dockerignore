@@ -1,0 +1,14 @@
+# 빌드 컨텍스트 최소화 — 의존성/산출물은 이미지 빌드 단계에서 새로 생성한다.
+node_modules
+dist
+.git
+*.log
+test
+scoreboards
+# 데모 번들/런타임 복사본(npm run demo:build 가 재생성). 소스(index.html, _samples 등)는 유지.
+#   주의: demo/_samples 는 compose.html 이 런타임에 fetch 하는 소스 자산이라 제외하면 안 됨.
+demo/docloom.mjs
+demo/docloom-web.mjs
+demo/rhwp.js
+demo/rhwp_bg.wasm
+.DS_Store

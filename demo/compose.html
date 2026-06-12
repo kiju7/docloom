@@ -40,11 +40,11 @@
   header h1 { font-size:21px; margin:0; letter-spacing:-.3px; font-weight:750; }
   header h1 .loom { color:var(--accent); }
 
-  /* ── 썸네일 스트립(미리보기 위) ── */
-  .strip { display:flex; gap:14px; align-items:flex-end; margin:6px 0 16px; }
-  .thumb { width:96px; cursor:pointer; border:0; background:none; padding:0; text-align:center; }
+  /* ── 썸네일 스트립(자료 패널 상단) ── */
+  .strip { display:flex; gap:12px; align-items:flex-end; margin:0 0 2px; flex:none; }
+  .thumb { width:86px; cursor:pointer; border:0; background:none; padding:0; text-align:center; }
   .thumb .card {
-    width:96px; height:124px; border-radius:10px; overflow:hidden; position:relative;
+    width:86px; height:112px; border-radius:10px; overflow:hidden; position:relative;
     background:#fff; border:1px solid var(--line); box-shadow:var(--shadow-sm);
     transition:transform .12s, box-shadow .12s, border-color .12s; }
   .thumb:hover .card { transform:translateY(-3px); box-shadow:var(--shadow-md); }
@@ -65,8 +65,8 @@
 
   header, .strip { flex:none; }
 
-  /* ── 본문 2열 (남는 높이를 채움) ── */
-  .cols { display:grid; grid-template-columns:1fr 380px; gap:18px; align-items:stretch;
+  /* ── 본문 2열 (남는 높이를 채움) — 좌: 자료 패널, 우: 미리보기(전체 높이) ── */
+  .cols { display:grid; grid-template-columns:340px 1fr; gap:18px; align-items:stretch;
     flex:1 1 auto; min-height:0; }
 
   /* 맥 브라우저 셸 */
@@ -82,10 +82,12 @@
     display:flex; align-items:center; gap:6px; padding:0 11px; font-size:12px; color:var(--soft);
     overflow:hidden; white-space:nowrap; }
   .addr .lock { color:var(--ok); font-size:11px; }
-  /* 무대: 데모와 동일 — iframe 이 영역을 꽉 채우고 미리보기는 그 안에서 스크롤(스크롤바 1개). */
+  /* 무대: 페이지를 stage 폭에 꽉 맞춰 스케일(JS fitMain) — 좌우 여백 없이 꽉 차고, 길면 세로 스크롤. */
   .browser .stage { position:relative; width:100%; flex:1 1 auto; min-height:0;
-    background:#eceef4; overflow:hidden; }
-  .browser .stage #frame { width:100%; height:100%; border:0; background:#fff; display:block; }
+    background:#eceef4; overflow:auto; display:block; }
+  #fitwrap { margin:0 auto; }                    /* 스케일된 페이지를 가로 가운데 */
+  .browser .stage #frame { width:794px; height:1123px; border:0; background:#fff; display:block;
+    transform-origin:top left; }                 /* 기본 크기를 줘 로드 즉시 표시(이후 fitMain 이 스케일) */
 
   /* 우측 패널 */
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
@@ -134,30 +136,19 @@
     <h1><span>doc</span><span class="loom">loom</span> · compose</h1>
   </header>
 
-  <!-- 썸네일 스트립: 등록 샘플 양식 + ＋업로드 -->
-  <div class="strip" id="strip">
-    <button class="thumb active" id="sampleThumb" title="등록된 샘플 양식">
-      <div class="card"><iframe class="mini" id="sampleMini" tabindex="-1" scrolling="no" sandbox="allow-scripts allow-same-origin"></iframe></div>
-      <div class="label">샘플 양식</div>
-    </button>
-    <button class="thumb add" id="addThumb" title="내 문서 양식 업로드">
-      <div class="card"><span class="plus">＋</span></div>
-      <div class="label">양식 업로드</div>
-    </button>
-  </div>
-
   <div class="cols">
-    <!-- 좌: 맥 브라우저 셸 미리보기 -->
-    <div class="browser">
-      <div class="bar">
-        <span class="dots"><i class="r"></i><i class="y"></i><i class="g"></i></span>
-        <span class="addr"><span class="lock">🔒</span><span id="addr">docloom://preview/샘플 양식</span></span>
-      </div>
-      <div class="stage" id="stage"><iframe id="frame" sandbox="allow-scripts allow-same-origin"></iframe></div>
-    </div>
-
-    <!-- 우: 자료 입력 -->
+    <!-- 좌: 자료 입력 패널 (상단에 샘플/업로드 썸네일) -->
     <div class="panel">
+      <div class="strip" id="strip">
+        <button class="thumb active" id="sampleThumb" title="등록된 샘플 양식">
+          <div class="card"><iframe class="mini" id="sampleMini" tabindex="-1" scrolling="no" sandbox="allow-scripts allow-same-origin"></iframe></div>
+          <div class="label">샘플 양식</div>
+        </button>
+        <button class="thumb add" id="addThumb" title="내 문서 양식 업로드">
+          <div class="card"><span class="plus">＋</span></div>
+          <div class="label">양식 업로드</div>
+        </button>
+      </div>
       <div class="field">
         <label>자료</label>
         <textarea id="material" placeholder="여기에 자료를 붙여넣으세요.&#10;&#10;예) 2026년 1분기 매출 12억, 전년 대비 18% 성장. 핵심 동인은 신규 구독 전환. 2분기 전망 14억."></textarea>
@@ -171,6 +162,15 @@
         <button data-v="result">반영본</button>
       </div>
       <button class="btn ghost" id="download" style="display:none">⬇ 결과 다운로드</button>
+    </div>
+
+    <!-- 우: 맥 브라우저 셸 미리보기 (전체 높이) -->
+    <div class="browser">
+      <div class="bar">
+        <span class="dots"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+        <span class="addr"><span class="lock">🔒</span><span id="addr">docloom://preview/샘플 양식</span></span>
+      </div>
+      <div class="stage" id="stage"><div id="fitwrap"><iframe id="frame" sandbox="allow-scripts allow-same-origin"></iframe></div></div>
     </div>
   </div>
 </div>
@@ -187,8 +187,9 @@
 
   const $ = (id) => document.getElementById(id);
 
-  // compose 채움만 서버(서버가 Ollama 호출). 배포 시 window.DOCLOOM_API 로 덮어씀(기본 :8080).
-  const API_BASE = (window.DOCLOOM_API || "http://localhost:8080").replace(/\/+$/, "");
+  // compose 채움만 서버(서버가 Ollama 호출). 기본은 같은 오리진(이 페이지를 서빙한 서버)로 호출 →
+  // dev.docloom.cookie.ai.kr·localhost 어디서 열든 동작. API 를 다른 호스트로 분리했다면 window.DOCLOOM_API 로 덮어씀.
+  const API_BASE = (window.DOCLOOM_API || "").replace(/\/+$/, "");
 
   const state = {
     formBytes: null, formName: "샘플 양식",
@@ -245,8 +246,31 @@
 
   const A4W = 794; // 썸네일 축소 기준 폭
 
-  // 메인 미리보기: 데모와 동일하게 **자연 크기**로 보여주고 스크롤은 iframe 내부 한 곳만(축소 안 함).
-  function loadMain(url) { $("frame").src = url; }
+  // 메인 미리보기: 페이지를 stage 폭에 꽉 맞춰 스케일. 미리보기 HTML 의 페이지네이션이
+  // 끝난 뒤 높이가 확정되므로, 로드 후 몇 번 재시도해 안정화한다(점프/지연 최소화).
+  function loadMain(url) {
+    const f = $("frame");
+    f.onload = () => { fitMain(); requestAnimationFrame(fitMain); setTimeout(fitMain, 120); setTimeout(fitMain, 400); };
+    f.src = url;
+  }
+
+  // 페이지 폭(--pw)을 stage 폭에 맞춰 scale. 좌우 여백 없이 꽉 차고, 내용이 길면 세로 스크롤.
+  function fitMain() {
+    const f = $("frame"), stage = $("stage"), wrap = $("fitwrap");
+    try {
+      const doc = f.contentDocument;
+      if (!doc) return;
+      const page = doc.querySelector(".page");
+      const pw = page?.offsetWidth || 794;       // 한 페이지 폭(--pw)
+      const contentH = Math.max(doc.documentElement.scrollHeight, doc.body?.scrollHeight || 0, 1123);
+      const s = Math.max(0.2, (stage.clientWidth - 16) / pw); // 폭 꽉 채움
+      f.style.width = pw + "px";
+      f.style.height = contentH + "px";
+      f.style.transform = `scale(${s})`;
+      wrap.style.width = pw * s + "px";          // 스케일된 크기로 래퍼를 잡아 스크롤·가운데정렬 정확히
+      wrap.style.height = contentH * s + "px";
+    } catch { /* same-origin 아닐 때 무시 */ }
+  }
 
   // 썸네일: 카드(96px)에 맞춰 A4 폭 기준 축소(문서 상단).
   function fitThumb(m) {
@@ -306,10 +330,13 @@
         body: JSON.stringify({ doc: bytesToB64(state.formBytes), material, name: state.formName }),
       });
       if (!res.ok) throw new Error(await res.text());
-      const { doc } = await res.json();
+      const { doc, meta } = await res.json();
       state.resultBytes = b64ToBytes(doc);
+      // .hwp 는 rhwp 가 HWPX 로 내보낸다 → 결과 미리보기·다운로드는 .hwpx 로 처리.
+      state.resultName = (meta?.output === "hwpx" && /\.hwp$/i.test(state.formName))
+        ? state.formName.replace(/\.hwp$/i, ".hwpx") : state.formName;
       if (state.resultPreviewUrl) URL.revokeObjectURL(state.resultPreviewUrl);
-      state.resultPreviewUrl = blobUrl(await clientPreview(state.resultBytes, state.formName));
+      state.resultPreviewUrl = blobUrl(await clientPreview(state.resultBytes, state.resultName));
       $("viewSeg").style.display = "flex";
       $("download").style.display = "inline-flex";
       showPreview("result");
@@ -325,7 +352,8 @@
     if (!state.resultBytes) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([state.resultBytes]));
-    const base = state.formName.replace(/\.[^.]+$/, ""), ext = state.formName.match(/\.[^.]+$/)?.[0] ?? "";
+    const nm = state.resultName || state.formName;
+    const base = nm.replace(/\.[^.]+$/, ""), ext = nm.match(/\.[^.]+$/)?.[0] ?? "";
     a.download = base + "-반영" + ext;
     a.click();
   }
@@ -343,16 +371,17 @@
   $("run").addEventListener("click", run);
   $("download").addEventListener("click", download);
   for (const b of $("viewSeg").querySelectorAll("button")) b.addEventListener("click", () => showPreview(b.dataset.v));
-  window.addEventListener("resize", () => fitThumb($("sampleMini")));
+  window.addEventListener("resize", () => { fitThumb($("sampleMini")); fitMain(); });
 
   async function loadSample() {
     $("addThumb").classList.remove("active"); $("sampleThumb").classList.add("active");
     $("sampleThumb").querySelector(".label").textContent = "샘플 양식";
     try {
-      const res = await fetch("_samples/sample-form.html");
+      // 회의록 docx 양식 — 채운 결과도 같은 docx 로 다운로드된다(docloom 은 같은 포맷 왕복).
+      const res = await fetch("_samples/sample-form.docx");
       if (!res.ok) throw new Error("샘플을 불러올 수 없음");
-      await loadForm(new Uint8Array(await res.arrayBuffer()), "sample-form.html");
-      state.formName = "sample-form.html";
+      await loadForm(new Uint8Array(await res.arrayBuffer()), "sample-form.docx");
+      state.formName = "sample-form.docx";
     } catch (e) { setStatus("샘플 로드 실패: " + (e?.message ?? e), "err"); }
   }
 

@@ -39,28 +39,38 @@ export function createOllamaClient(opts: OllamaOptions = {}): LlmClient {
     },
 
     async chatJson({ model, system, user }): Promise<unknown> {
-      const res = await call(`/api/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model,
-          stream: false,
-          format: "json", // JSON 강제 디코딩
-          options: { temperature: 0 },
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: user },
-          ],
-        }),
-      });
-      if (!res.ok) throw new Error(`[ollama] /api/chat 실패: ${res.status} ${await res.text().catch(() => "")}`);
-      const data = (await res.json()) as { message?: { content?: string } };
-      const content = data.message?.content ?? "";
-      try {
-        return JSON.parse(content);
-      } catch {
-        throw new Error(`[ollama] 모델이 JSON 이 아닌 응답을 반환: ${content.slice(0, 200)}`);
+      // reasoning 모델(gpt-oss 등)은 간헐적으로 content 가 비거나(추론에 출력 소진) 깨진 JSON 을
+      // 내놓는다. temperature 를 살짝 올려 1회 재시도하면 대부분 회복된다(temp=0 재시도는 동일 결과라 무의미).
+      let lastDetail = "";
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await call(`/api/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model,
+            stream: false,
+            format: "json", // JSON 강제 디코딩
+            options: { temperature: attempt === 0 ? 0 : 0.4 },
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
+          }),
+        });
+        if (!res.ok) throw new Error(`[ollama] /api/chat 실패: ${res.status} ${await res.text().catch(() => "")}`);
+        const data = (await res.json()) as { message?: { content?: string } };
+        const content = (data.message?.content ?? "").trim();
+        if (content) {
+          try {
+            return JSON.parse(content);
+          } catch {
+            lastDetail = `JSON 파싱 실패: ${content.slice(0, 200)}`;
+          }
+        } else {
+          lastDetail = "빈 응답(content 없음)";
+        }
       }
+      throw new Error(`[ollama] 모델이 JSON 응답을 주지 않음(재시도 후) — ${lastDetail}`);
     },
   };
 }

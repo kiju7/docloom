@@ -27,4 +27,6 @@ test/fixtures/sample.hwpx
 # compose 데모용 샘플 양식은 배포(Pages)에 포함되도록 예외.
 /demo/_samples/*
 !/demo/_samples/sample-form.html
+!/demo/_samples/sample-form.docx
+!/demo/_samples/make-sample-form.mjs
 /scoreboards/

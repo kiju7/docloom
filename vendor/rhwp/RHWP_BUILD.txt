@@ -1,1 +1,1 @@
-0f049da1150bc092f296a92d0a82dc554f8df1ce
+npm @rhwp/core 0.7.15

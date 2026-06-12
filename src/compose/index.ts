@@ -10,6 +10,7 @@ import { encode, decode, adapterFor } from "../registry.js";
 import type { FillStrategy, LlmClient } from "./types.js";
 import { jsonFill } from "./strategies/jsonFill.js";
 import { composePdf } from "./pdfFill.js";
+import { composeHwpRhwp, type HwpDocCtor } from "./hwpRhwp.js";
 
 export interface ComposeDeps {
   llm: LlmClient;
@@ -18,6 +19,11 @@ export interface ComposeDeps {
   strategy?: FillStrategy;
   /** 포맷 힌트(보통 파일 확장자에서). 미지정 시 자동판별. */
   format?: OfficeFormat;
+  /**
+   * rhwp(WASM) HwpDocument 생성자(호출측 주입). 주어지고 입력이 .hwp 면 rhwp 경로로 표 셀까지 채운다.
+   * (없으면 순수 TS 경로 — 표는 frozen 이라 셀은 못 채움). 결과는 HWPX 로 나온다.
+   */
+  HwpDocument?: HwpDocCtor;
 }
 
 export interface ComposeResult {
@@ -41,8 +47,20 @@ export async function composeDocument(
     return { bytes: out, editedHtml: "", meta };
   }
 
+  // .hwp + rhwp 주입 시: 표 셀까지 채우는 rhwp 경로(결과는 HWPX). 미주입이면 아래 순수 TS 경로로.
+  if (deps.HwpDocument && adapterFor(bytes, deps.format).id === "hwp") {
+    const { bytes: out, meta } = await composeHwpRhwp(bytes, material, {
+      llm: deps.llm,
+      model: deps.model,
+      HwpDocument: deps.HwpDocument,
+    });
+    return { bytes: out, editedHtml: "", meta };
+  }
+
   const strategy = deps.strategy ?? jsonFill;
-  const { html, manifest } = encode(bytes, { format: deps.format }) as {
+  // editableTables: 문서 표를 frozen(편집불가) 대신 셀 채움 가능한 형태로 인코딩한다.
+  // 표를 지원하지 않는 포맷(xlsx 등)은 이 옵션을 무시한다.
+  const { html, manifest } = encode(bytes, { format: deps.format, editableTables: true }) as {
     html: string;
     manifest: import("../model/manifest.js").Manifest;
   };
