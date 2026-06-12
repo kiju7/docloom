@@ -254,21 +254,25 @@
     f.src = url;
   }
 
-  // 페이지 폭(--pw)을 stage 폭에 맞춰 scale. 좌우 여백 없이 꽉 차고, 내용이 길면 세로 스크롤.
+  // 실제 콘텐츠 폭(scrollWidth)을 측정해 stage 폭에 맞춰 scale — docx(.page 794), hwp(.hp-page 가변),
+  // 넘치는 요소까지 화면에 정확히 맞춘다(좌우 넘침 없음). 내용이 길면 세로 스크롤.
   function fitMain() {
     const f = $("frame"), stage = $("stage"), wrap = $("fitwrap");
     try {
       const doc = f.contentDocument;
       if (!doc) return;
-      const page = doc.querySelector(".page");
-      const pw = page?.offsetWidth || 794;       // 한 페이지 폭(--pw)
-      const contentH = Math.max(doc.documentElement.scrollHeight, doc.body?.scrollHeight || 0, 1123);
-      const s = Math.max(0.2, (stage.clientWidth - 16) / pw); // 폭 꽉 채움
-      f.style.width = pw + "px";
-      f.style.height = contentH + "px";
+      // 기준 폭으로 레이아웃 후 실제 콘텐츠 폭/높이 측정(넘침 포함). 측정 시 reflow 강제됨.
+      const REF = 820;
+      f.style.transform = "none";
+      f.style.width = REF + "px";
+      const cw = Math.max(doc.documentElement.scrollWidth, doc.body ? doc.body.scrollWidth : 0, 360);
+      const ch = Math.max(doc.documentElement.scrollHeight, doc.body ? doc.body.scrollHeight : 0, 200);
+      const s = Math.max(0.15, (stage.clientWidth - 16) / cw); // 콘텐츠 폭을 stage 에 꽉 맞춤
+      f.style.width = cw + "px";
+      f.style.height = ch + "px";
       f.style.transform = `scale(${s})`;
-      wrap.style.width = pw * s + "px";          // 스케일된 크기로 래퍼를 잡아 스크롤·가운데정렬 정확히
-      wrap.style.height = contentH * s + "px";
+      wrap.style.width = cw * s + "px";          // 스케일된 크기로 래퍼를 잡아 스크롤·가운데정렬 정확히
+      wrap.style.height = ch * s + "px";
     } catch { /* same-origin 아닐 때 무시 */ }
   }
 
