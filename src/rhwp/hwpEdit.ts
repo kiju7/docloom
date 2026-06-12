@@ -1571,8 +1571,16 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
       const colKids = kids.filter((k) => k.type === "Column" && k.bbox);
       if (!inCell && colKids.length >= 2 && new Set(colKids.map((k) => Math.round(k.bbox!.x))).size >= 2) {
         const rest = kids.filter((k) => k.type !== "Column").map((c) => renderTreeNode(c, ctx, inCell, cont)).join("");
+        // 컬럼보다 훨씬 넓은(1.4배+) 자식 = 전체폭 요소(논문 제목표 등). 컬럼에 가두면 겹치므로
+        // 전체폭 밴드로 hoist 하고, 좁은 자식만 컬럼에 남긴다.
+        const fullX = Math.min(...colKids.map((k) => k.bbox!.x));
+        const fullW = Math.max(...colKids.map((k) => k.bbox!.x + k.bbox!.w)) - fullX;
+        const isWide = (col: TNode, c: TNode) => !!c.bbox && c.bbox.w > col.bbox!.w * 1.4;
+        const wideBands = colKids.flatMap((col) => (col.children ?? []).filter((c) => isWide(col, c)))
+          .sort((a, b) => a.bbox!.y - b.bbox!.y)
+          .map((c) => `<div class="hp-band">${renderTreeNode(c, ctx, false, { x: fullX, w: fullW })}</div>`).join("");
         const colHtml = (col: TNode) =>
-          (col.children ?? []).map((c) => renderTreeNode(c, ctx, false, { x: col.bbox!.x, w: col.bbox!.w })).join("");
+          (col.children ?? []).filter((c) => !isWide(col, c)).map((c) => renderTreeNode(c, ctx, false, { x: col.bbox!.x, w: col.bbox!.w })).join("");
         // y 가 비슷한(같은 밴드) 단끼리 묶는다.
         const sorted = [...colKids].sort((a, b) => (a.bbox!.y - b.bbox!.y) || (a.bbox!.x - b.bbox!.x));
         const bands: TNode[][] = [];
@@ -1592,7 +1600,7 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
           }).join("");
           return `<div class="hp-cols">${cells}</div>`;
         }).join("");
-        return rest + bandsHtml;
+        return rest + wideBands + bandsHtml;
       }
       return kids.map((c) => renderTreeNode(c, ctx, inCell, cont)).join("");
     }
