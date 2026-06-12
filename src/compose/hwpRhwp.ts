@@ -14,7 +14,7 @@
 import { parse, type HTMLElement } from "node-html-parser";
 import { hwpToEditableHtml, applyHwpEdits, type RhwpDoc } from "../rhwp/hwpEdit.js";
 import { FILL_SYSTEM } from "./llmFill.js";
-import { buildStructuredUser, isFillTarget } from "./strategies/structuredFill.js";
+import { buildStructuredUser, isFillField } from "./strategies/structuredFill.js";
 import type { LlmClient } from "./types.js";
 
 export type HwpDocCtor = new (bytes: Uint8Array) => RhwpDoc & {
@@ -33,9 +33,12 @@ const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;"
 const norm = (s: string): string => s.replace(/​/g, "").replace(/\s+/g, " ").trim();
 const selfLabel = (t: string): string => { const m = t.match(/^(.{1,40}?)\s*[::]\s*$/); return m ? m[1]!.trim() : ""; };
 
-/** rhwp 편집 HTML 의 표에서 각 셀 앵커 → 항목(라벨): 같은 행 좌측 셀, 없으면 열 헤더. */
-function buildHwpLabelMap(root: HTMLElement): Map<HTMLElement, string> {
-  const map = new Map<HTMLElement, string>();
+/**
+ * rhwp 편집 HTML 의 표에서 각 셀 앵커 → {항목, 라벨여부}. 표 방향 판별(structuredFill 과 동일):
+ * 헤더형=첫 행 라벨/이후 열헤더값, 쌍형=짝수열 라벨/홀수열 값. 라벨 칸은 isLabel=true(보존).
+ */
+function buildHwpLabelMap(root: HTMLElement): Map<HTMLElement, { label: string; isLabel: boolean }> {
+  const map = new Map<HTMLElement, { label: string; isLabel: boolean }>();
   for (const table of root.querySelectorAll("table")) {
     const grid = table.querySelectorAll("tr").map((tr) => {
       const out: { anchor: HTMLElement | null; col: number; text: string }[] = [];
@@ -48,16 +51,27 @@ function buildHwpLabelMap(root: HTMLElement): Map<HTMLElement, string> {
       }
       return out;
     });
-    const headerByCol: Record<number, string> = {};
-    if (grid[0]) for (const c of grid[0]) headerByCol[c.col] = c.text;
-    grid.forEach((row, r) => {
-      row.forEach((cell, idx) => {
-        if (!cell.anchor) return;
-        let label = idx > 0 ? row[idx - 1]!.text : "";
-        if (!label && r > 0) label = headerByCol[cell.col] ?? "";
-        if (label) map.set(cell.anchor, label);
-      });
-    });
+    if (grid.length === 0) continue;
+    const row0Filled = grid[0]!.length > 0 && grid[0]!.every((c) => c.text !== "");
+    const laterEmpty = grid.slice(1).some((r) => r.some((c) => c.text === ""));
+    const set = (cell: { anchor: HTMLElement | null }, info: { label: string; isLabel: boolean }) => {
+      if (cell.anchor) map.set(cell.anchor, info);
+    };
+    if (grid.length >= 2 && row0Filled && laterEmpty) {
+      const headerByCol: Record<number, string> = {};
+      for (const c of grid[0]!) headerByCol[c.col] = c.text;
+      grid.forEach((row, r) =>
+        row.forEach((cell) =>
+          set(cell, r === 0 ? { label: cell.text, isLabel: true } : { label: headerByCol[cell.col] ?? "", isLabel: false }),
+        ),
+      );
+    } else {
+      grid.forEach((row) =>
+        row.forEach((cell, idx) =>
+          set(cell, cell.col % 2 === 0 ? { label: cell.text, isLabel: true } : { label: idx > 0 ? row[idx - 1]!.text : "", isLabel: false }),
+        ),
+      );
+    }
   }
   return map;
 }
@@ -76,17 +90,19 @@ export async function composeHwpRhwp(
   const anchors = root.querySelectorAll("[data-hc],[data-hcp],[data-h]");
   const fields = anchors.map((el, i) => {
     const current = norm(el.textContent ?? "");
+    const info = labelMap.get(el);
     return {
       id: `s${i}`,
       role: el.getAttribute("data-h") != null ? "body" : "cell",
       current,
-      label: labelMap.get(el) || selfLabel(current),
+      label: info?.label || selfLabel(current),
+      isLabel: info?.isLabel ?? false,
     };
   });
 
-  // 채울 칸(빈칸·'라벨:')만 LLM 에 보낸다 — 라벨 셀·긴 안내문은 제외(프롬프트 축소·안내문 보존).
-  // 각 빈칸엔 항목(좌측 라벨/열 헤더)을 붙여 정확히 배치되게 한다(structuredFill 과 동일 원리).
-  const send = fields.filter((f) => isFillTarget(f.current));
+  // 채울 칸만 LLM 에 보낸다(빈칸·'라벨:'·라벨 붙은 값=기채움 교체 포함). 라벨/헤더 칸·긴 안내문 제외.
+  // 각 칸엔 항목(좌측 라벨/열 헤더)을 붙여 정확히 배치되게 한다(structuredFill 과 동일 원리).
+  const send = fields.filter((f) => !f.isLabel && isFillField(f.current, f.label));
   let slots: Record<string, string> = {};
   if (send.length > 0) {
     const raw = (await deps.llm.chatJson({

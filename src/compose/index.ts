@@ -8,7 +8,7 @@
 import type { OfficeFormat } from "../core/format.js";
 import { encode, decode, adapterFor } from "../registry.js";
 import type { FillStrategy, LlmClient } from "./types.js";
-import { structuredFill } from "./strategies/structuredFill.js";
+import { jsonFill } from "./strategies/jsonFill.js";
 import { composePdf } from "./pdfFill.js";
 import { composeHwpRhwp, type HwpDocCtor } from "./hwpRhwp.js";
 
@@ -57,8 +57,8 @@ export async function composeDocument(
     return { bytes: out, editedHtml: "", meta };
   }
 
-  // 기본 전략: structuredFill(빈 칸에 항목/열헤더 라벨을 붙여 정확도↑·토큰↓). jsonFill 은 비교용 opt-in.
-  const strategy = deps.strategy ?? structuredFill;
+  // 라이브러리 기본은 jsonFill(하위호환·반복그룹 지원). 서버는 structuredFill 을 명시 주입한다.
+  const strategy = deps.strategy ?? jsonFill;
   // editableTables: 문서 표를 frozen(편집불가) 대신 셀 채움 가능한 형태로 인코딩한다.
   // 표를 지원하지 않는 포맷(xlsx 등)은 이 옵션을 무시한다.
   const { html, manifest } = encode(bytes, { format: deps.format, editableTables: true }) as {

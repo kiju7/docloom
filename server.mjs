@@ -11,7 +11,7 @@ import { readFile } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { previewHtml, encode, decode, composeDocument, createOllamaClient, formatFromFilename } from "./dist/index.js";
+import { previewHtml, encode, decode, composeDocument, createOllamaClient, formatFromFilename, structuredFill } from "./dist/index.js";
 
 // .env 자동 로드(있으면). 의존성 0. 클라우드 배포(Render 등)·docker --env-file 은 process.env 로 직접
 // 주입되므로 .env 없이도 동일하게 동작한다.
@@ -164,7 +164,9 @@ createServer(async (req, res) => {
       const fmt = name ? formatFromFilename(name) : undefined;
       const llm = createOllamaClient({ endpoint: OLLAMA_HOST });
       const model = await pickModel(llm);
-      const deps = { llm, model, format: fmt };
+      // structuredFill: 빈 칸/값 칸에 항목(라벨·열헤더)을 붙여 정확 배치 + 기채움 값 교체.
+      // (hwp 는 자체 rhwp 경로가 같은 구조화 채움을 쓰고, pdf 는 별도 경로라 strategy 무관.)
+      const deps = { llm, model, format: fmt, strategy: structuredFill };
       // .hwp 는 rhwp 로 표 셀까지 채운다(결과는 HWPX). 로드 실패 시 순수 TS 경로로 폴백.
       if (fmt === "hwp") {
         try { deps.HwpDocument = await loadHwpCtor(); }
