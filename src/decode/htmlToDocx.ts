@@ -104,7 +104,21 @@ function blockToNodes(block: Block, manifest: Manifest, palette: Palette): XmlNo
 
 /** 편집된 셀 텍스트를 원본 w:tbl 에 반영(바뀐 셀만 — 미변경 셀은 원본 그대로 보존). */
 function patchTableCells(tbl: XmlNode, block: Extract<Block, { type: "table" }>): void {
-  const trs = childrenOf(tbl).filter((n) => tagOf(n) === "w:tr");
+  let trs = childrenOf(tbl).filter((n) => tagOf(n) === "w:tr");
+  // 행 확장: 편집 HTML 의 행이 원본보다 많으면 마지막 행을 복제해 채운다(자료 항목 수만큼 늘림).
+  if (block.rows.length > trs.length && trs.length > 0) {
+    const template = trs[trs.length - 1]!;
+    const kids = childrenOf(tbl);
+    let at = kids.indexOf(template);
+    const extra = block.rows.length - trs.length;
+    for (let k = 0; k < extra; k++) {
+      const clone = structuredClone(template) as XmlNode;
+      kids.splice(at + 1, 0, clone);
+      at += 1;
+    }
+    setChildren(tbl, kids);
+    trs = childrenOf(tbl).filter((n) => tagOf(n) === "w:tr");
+  }
   block.rows.forEach((row, r) => {
     const tr = trs[r];
     if (!tr) return;

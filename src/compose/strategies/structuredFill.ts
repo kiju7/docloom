@@ -13,12 +13,16 @@
 import { z } from "zod";
 import type { FillStrategy, FillResult } from "../types.js";
 import { applyFill } from "../fill.js";
-import { collectSlotNodes, slotTextOf } from "../descriptor.js";
+import { collectSlotNodes, slotTextOf, buildRepeatGroups } from "../descriptor.js";
 import { FILL_SYSTEM } from "../llmFill.js";
-import { parseXml, tagOf, childrenOf, attrOf, deepText } from "../../core/xml.js";
+import { parseXml, buildXml, tagOf, childrenOf, attrOf, deepText, setChildren, makeTextNode } from "../../core/xml.js";
 import type { XmlNode } from "../../core/xml.js";
 
-const FILL_SCHEMA = z.object({ slots: z.record(z.string(), z.string()) });
+const FILL_SCHEMA = z.object({
+  slots: z.record(z.string(), z.string()).default({}),
+  groups: z.record(z.string(), z.array(z.string())).optional(),
+  tables: z.record(z.string(), z.array(z.array(z.string()))).optional(),
+});
 
 /** 트리에서 tag 노드 깊이우선 수집. */
 function deepFind(nodes: XmlNode[], tag: string, out: XmlNode[] = []): XmlNode[] {
@@ -101,10 +105,66 @@ export function isFillField(current: string, label: string): boolean {
   return label !== "" && current.length <= 40; // 라벨 붙은 짧은 값 = 교체 대상
 }
 
-/** 구조화 프롬프트(항목/라벨 동반). hwp(rhwp) 경로도 공유한다. */
+/** 반복 표(헤더형: 첫 행 머리글 + 데이터 행) 한 개. */
+interface TableGroup {
+  ref: string;
+  headers: string[];
+  /** 데이터 행 셀 노드(고정 슬롯 전송에서 제외용). */
+  cellNodes: Set<XmlNode>;
+}
+
+/** 트리에서 반복 가능한 표(헤더형) 수집. 정보표(쌍형)는 제외. */
+function buildTableGroups(tree: XmlNode[]): TableGroup[] {
+  const out: TableGroup[] = [];
+  for (const table of deepFind(tree, "table")) {
+    const ref = attrOf(table, "data-table");
+    if (ref === undefined) continue;
+    const grid = deepFind([table], "tr").map((tr) =>
+      childrenOf(tr)
+        .filter((c) => tagOf(c) === "td" || tagOf(c) === "th")
+        .map((td) => ({ node: td, text: deepText(td).trim() })),
+    );
+    if (grid.length < 2) continue;
+    const row0Filled = grid[0]!.length > 0 && grid[0]!.every((c) => c.text !== "");
+    const laterEmpty = grid.slice(1).some((r) => r.some((c) => c.text === ""));
+    if (!(row0Filled && laterEmpty)) continue; // 헤더형만 반복 표
+    const cellNodes = new Set<XmlNode>();
+    grid.slice(1).forEach((row) => row.forEach((c) => cellNodes.add(c.node)));
+    out.push({ ref, headers: grid[0]!.map((c) => c.text), cellNodes });
+  }
+  return out;
+}
+
+/** 표 행 확장: 응답 tables[ref]=행배열 만큼 마지막 데이터 행을 복제해 셀을 채운다. */
+function expandTableRows(html: string, tables: Record<string, string[][]> | undefined): string {
+  if (!tables || Object.keys(tables).length === 0) return html;
+  const tree = parseXml(html);
+  for (const table of deepFind(tree, "table")) {
+    const ref = attrOf(table, "data-table");
+    const rows = ref !== undefined ? tables[ref] : undefined;
+    if (!rows || rows.length === 0) continue;
+    const tbody = childrenOf(table).find((n) => tagOf(n) === "tbody") ?? table;
+    const trs = childrenOf(tbody).filter((n) => tagOf(n) === "tr");
+    if (trs.length < 2) continue;
+    const headerTr = trs[0]!;
+    const template = trs[trs.length - 1]!;
+    const newRows = rows.map((vals) => {
+      const clone = structuredClone(template) as XmlNode;
+      const cells = childrenOf(clone).filter((c) => tagOf(c) === "td" || tagOf(c) === "th");
+      cells.forEach((td, c) => setChildren(td, [makeTextNode(vals[c] ?? "")]));
+      return clone;
+    });
+    setChildren(tbody, [headerTr, ...newRows]);
+  }
+  return buildXml(tree);
+}
+
+/** 구조화 프롬프트(항목/라벨 + 반복그룹 + 반복표 동반). hwp(rhwp) 경로도 공유한다. */
 export function buildStructuredUser(
   fields: { id: string; label: string; role: string; current: string }[],
   material: string,
+  groups: { groupId: string; role: string; 예시항목: string[] }[] = [],
+  tables: { id: string; 열: string[] }[] = [],
 ): string {
   const slots = fields.map((f) => ({
     id: f.id,
@@ -112,9 +172,25 @@ export function buildStructuredUser(
     역할: f.role,
     현재값: f.current,
   }));
-  return [
+  const lines = [
     "## 채울 양식 필드 (항목=칸의 라벨/머리글, 현재값=지금 내용; 현재값이 비었거나 '라벨:' 면 채울 칸)",
     JSON.stringify(slots, null, 1),
+  ];
+  if (groups.length > 0) {
+    lines.push(
+      "",
+      "## 반복 목록(groups) — 자료 개수만큼 항목을 늘리거나 줄여 채운다(글머리/목록).",
+      JSON.stringify(groups, null, 1),
+    );
+  }
+  if (tables.length > 0) {
+    lines.push(
+      "",
+      "## 반복 표(tables) — 각 표의 '열' 순서대로 행을 자료 개수만큼 만든다(행 자동 확장).",
+      JSON.stringify(tables, null, 1),
+    );
+  }
+  lines.push(
     "",
     "## 자료",
     material,
@@ -124,8 +200,19 @@ export function buildStructuredUser(
     "현재값이 비어 있으면 **값만** 넣어라 — 항목명(라벨)은 옆 칸에 따로 있으니 값에 반복하지 말 것. (예: 항목 '회의명' → '2분기 로드맵', '회의명: …' 아님)",
     "현재값이 '일시: ' 처럼 콜론으로 끝나면 그 라벨을 그대로 유지하고 콜론 뒤에만 값을 이어 써라.",
     "현재값 자체가 항목명(라벨)인 칸은 건드리지 말 것(생략).",
-    '출력은 { "slots": { "<id>": "<값>" } } JSON 만. 자료에 없는 항목은 생략.',
-  ].join("\n");
+  );
+  if (tables.length > 0) {
+    lines.push(
+      "반복 표는 tables 의 각 id 에 행 배열을 넣어라 — 각 행은 '열' 순서의 문자열 배열. 자료 항목 수만큼 행을 만든다(번호 열이 있으면 1,2,3… 로 채움).",
+    );
+  }
+  if (groups.length > 0) {
+    lines.push("반복 목록은 groups 의 각 groupId 에 문자열 배열로 자료 개수만큼 채운다(많으면 늘리고 적으면 줄임).");
+  }
+  lines.push(
+    `출력 JSON: { "slots": {…}${groups.length ? ', "groups": {…}' : ""}${tables.length ? ', "tables": { "<id>": [["행1열1","행1열2",…], …] }' : ""} }. 없는 건 생략. 설명·코드펜스 금지.`,
+  );
+  return lines.join("\n");
 }
 
 export const structuredFill: FillStrategy = {
@@ -146,17 +233,44 @@ export const structuredFill: FillStrategy = {
         isLabel: info?.isLabel ?? false,
       };
     });
-    // 채울 칸 전송: 빈 칸 + '라벨:' + 라벨 붙은 값 칸(기채움도 교체 대상). 라벨/헤더 칸·긴 본문은 제외.
-    const send = fields.filter((f) => !f.isLabel && isFillField(f.current, f.label));
+
+    // 반복 목록(연속 li) → 자료 개수만큼 확장.
+    const repeatGroups = buildRepeatGroups(slotNodes);
+    const groupMembers = new Set(repeatGroups.flatMap((g) => g.memberIds));
+    const groupsForPrompt = repeatGroups.map((g) => ({
+      groupId: g.groupId,
+      role: g.unit[0]!.role,
+      예시항목: g.memberIds.map((id) => fields[Number(id.slice(1))]?.current ?? ""),
+    }));
+    // 반복 표(헤더형) → 행 자동 확장. 데이터 행 셀은 고정 슬롯 전송에서 제외(표로 따로 채움).
+    const tableGroups = buildTableGroups(tree);
+    const tableCellNodes = new Set(tableGroups.flatMap((tg) => [...tg.cellNodes]));
+    const tablesForPrompt = tableGroups.map((tg) => ({ id: tg.ref, 열: tg.headers }));
+
+    // 채울 칸 전송: 빈 칸/'라벨:'/라벨 붙은 값(기채움 교체). 라벨·헤더 칸, 반복그룹/표 멤버, 긴 본문 제외.
+    const send = fields.filter(
+      (f, i) => !f.isLabel && !groupMembers.has(f.id) && !tableCellNodes.has(slotNodes[i]!.node) && isFillField(f.current, f.label),
+    );
 
     let slots: Record<string, string> = {};
-    if (send.length > 0) {
-      const raw = await llm.chatJson({ model, system: FILL_SYSTEM, user: buildStructuredUser(send, material) });
+    let groups: Record<string, string[]> | undefined;
+    let tables: Record<string, string[][]> | undefined;
+    if (send.length > 0 || groupsForPrompt.length > 0 || tablesForPrompt.length > 0) {
+      const raw = await llm.chatJson({
+        model,
+        system: FILL_SYSTEM,
+        user: buildStructuredUser(send, material, groupsForPrompt, tablesForPrompt),
+      });
       const parsed = FILL_SCHEMA.safeParse(raw);
-      if (parsed.success) slots = parsed.data.slots;
+      if (parsed.success) {
+        slots = parsed.data.slots;
+        groups = parsed.data.groups;
+        tables = parsed.data.tables;
+      }
     }
-    const result: FillResult = { slots };
-    const editedHtml = applyFill(editableHtml, result);
+    const result: FillResult = { slots, ...(groups ? { groups } : {}) };
+    let editedHtml = applyFill(editableHtml, result);
+    editedHtml = expandTableRows(editedHtml, tables); // 표 행 확장(applyFill 이후 — 슬롯 id 안 흔듦)
     return {
       editedHtml,
       meta: {
@@ -164,6 +278,7 @@ export const structuredFill: FillStrategy = {
         slotCount: fields.length,
         fillTargets: send.length,
         filledCount: Object.keys(slots).length,
+        groups: groups ? Object.keys(groups).length : 0,
       },
     };
   },
