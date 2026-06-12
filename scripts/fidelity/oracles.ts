@@ -22,7 +22,7 @@ const pj = <T = any,>(s: string | undefined): T | null => {
 };
 const strip = (s: string): string => s.replace(/\s+/g, "");
 
-interface TNode { type: string; text?: string; children?: TNode[] }
+interface TNode { type: string; text?: string; bbox?: { x: number; y: number; w: number; h: number }; children?: TNode[] }
 
 /** 한 문서의 본문+셀 정답 텍스트, 표별 지문(가장 긴 셀), 트리 이미지 수, 머리말꼬리말. */
 interface Truth { text: string; tableProbes: string[]; imageNodes: number; hf: string[] }
@@ -53,11 +53,29 @@ function longestCellProbe(doc: RhwpDocFull, s: number, p: number, ci: number): s
   return best.slice(0, PROBE_LEN);
 }
 
-function countImageNodes(n: TNode | null): number {
-  if (!n) return 0;
-  let c = n.type === "Image" ? 1 : 0;
-  for (const ch of n.children ?? []) c += countImageNodes(ch);
-  return c;
+function collectImageBoxes(n: TNode | null, out: { x: number; y: number }[] = []): { x: number; y: number }[] {
+  if (!n) return out;
+  if (n.type === "Image" && n.bbox) out.push({ x: n.bbox.x, y: n.bbox.y });
+  for (const ch of n.children ?? []) collectImageBoxes(ch, out);
+  return out;
+}
+
+/** 한 페이지의 이미지 노드 수 — rhwp 가 같은 그림을 stepping 좌표로 여러 번 노출하는
+ *  아티팩트를 제거(미리보기 imgSeen 과 동일하게 100px 근접 중복 1개로). 위치 없는 노드는
+ *  보수적으로 각각 1개로 센다. */
+function distinctImageCount(page: TNode | null): number {
+  if (!page) return 0;
+  const boxes = collectImageBoxes(page);
+  let noBox = 0;
+  const kept: { x: number; y: number }[] = [];
+  (function walk(n: TNode) {
+    if (n.type === "Image" && !n.bbox) noBox++;
+    for (const ch of n.children ?? []) walk(ch);
+  })(page);
+  for (const b of boxes) {
+    if (!kept.some((k) => Math.abs(k.x - b.x) < 100 && Math.abs(k.y - b.y) < 100)) kept.push(b);
+  }
+  return kept.length + noBox;
 }
 
 function extractTruth(doc: RhwpDocFull): Truth {
@@ -88,10 +106,10 @@ function extractTruth(doc: RhwpDocFull): Truth {
       }
     }
   }
-  // 트리 이미지 노드 수
+  // 트리 이미지 노드 수(페이지별 근접중복 제거 — 미리보기 dedup 과 정합).
   let imageNodes = 0;
   const pageN = safe(() => doc.pageCount()) ?? 0;
-  for (let i = 0; i < pageN; i++) imageNodes += countImageNodes(pj<TNode>(safe(() => doc.getPageRenderTree?.(i))));
+  for (let i = 0; i < pageN; i++) imageNodes += distinctImageCount(pj<TNode>(safe(() => doc.getPageRenderTree?.(i))));
   // 머리말/꼬리말 텍스트 — getHeaderFooter 는 JSON 봉투 {ok,exists,text,paraIndex,controlIndex}.
   // collectHfBlocks 와 동일하게 exists 확인 + (isHeader|paraIndex|controlIndex) 중복제거 + 빈 HF 제외.
   const hf: string[] = [];
