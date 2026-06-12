@@ -1615,6 +1615,18 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
           .map((c) => `<div class="hp-band">${renderTreeNode(c, ctx, false, { x: fullX, w: fullW })}</div>`).join("");
         const colHtml = (col: TNode) =>
           (col.children ?? []).filter((c) => !isWide(col, c)).map((c) => renderTreeNode(c, ctx, false, { x: col.bbox!.x, w: col.bbox!.w })).join("");
+        // 다단 셀 내부는 **절대좌표 배치**(rhwp 데모처럼) — 흐름이면 텍스트 reflow 누적으로 이미지가 튄다.
+        // 각 자식(줄·그림·표)을 컬럼 기준 bbox 좌표에 박아 드리프트 없이 원본 위치 보존.
+        const colHtmlAbs = (col: TNode) => {
+          const cx = col.bbox!.x, cy = col.bbox!.y;
+          return (col.children ?? []).filter((c) => !isWide(col, c)).map((c) => {
+            const inner = renderTreeNode(c, ctx, false, { x: col.bbox!.x, w: col.bbox!.w });
+            if (!inner) return "";
+            return c.bbox
+              ? `<div class="hp-colabs" style="left:${Math.round(c.bbox.x - cx)}px;top:${Math.round(c.bbox.y - cy)}px;width:${Math.round(c.bbox.w)}px">${inner}</div>`
+              : inner;
+          }).join("");
+        };
         // y 가 비슷한(같은 밴드) 단끼리 묶는다.
         const sorted = [...colKids].sort((a, b) => (a.bbox!.y - b.bbox!.y) || (a.bbox!.x - b.bbox!.x));
         const bands: TNode[][] = [];
@@ -1630,7 +1642,7 @@ function renderTreeNode(node: TNode, ctx: TreeCtx, inCell: boolean, cont?: { x: 
             const next = ordered[i + 1];
             const gap = next ? Math.max(0, Math.round(next.bbox!.x - (col.bbox!.x + col.bbox!.w))) : 0;
             const mr = gap ? `;margin-right:${gap}px` : "";
-            return `<div class="hp-colcell" style="width:${Math.round(col.bbox!.w)}px${mr}">${colHtml(col)}</div>`;
+            return `<div class="hp-colcell" style="position:relative;width:${Math.round(col.bbox!.w)}px;height:${Math.round(col.bbox!.h)}px${mr}">${colHtmlAbs(col)}</div>`;
           }).join("");
           return `<div class="hp-cols">${cells}</div>`;
         }).join("");
@@ -1963,6 +1975,7 @@ export function hwpToTreePreviewHtml(
   /* 다단(多段): 전체폭 밴드(흐름) + 좁은 단 묶음(flex 좌우 병렬). y 순으로 흐름배치 → 겹침 없음. */
   .hp-cols{display:flex;align-items:flex-start}
   .hp-colcell{overflow-wrap:anywhere}
+  .hp-colabs{position:absolute}
   /* 각주 영역 — 본문과 사이 여백 + 구분선 아래 각주 글자(흐름). */
   .hp-fnarea{margin-top:14px}
   .hp-fn-sep{margin-bottom:3px}

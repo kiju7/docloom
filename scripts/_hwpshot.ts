@@ -1,0 +1,14 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import puppeteer from "puppeteer-core";
+import { loadRhwp } from "./rhwpNode.js";
+import { hwpToTreePreviewHtml } from "../src/rhwp/hwpEdit.js";
+const HwpDocument = (await loadRhwp())!;
+const bytes = new Uint8Array(readFileSync(process.argv[2]!));
+const html = hwpToTreePreviewHtml(new (HwpDocument as any)(bytes), { title: "x", rawBytes: bytes });
+writeFileSync((process.argv[3]||"/tmp/h") + ".html", html);
+const b=await puppeteer.launch({executablePath:"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",headless:true,args:["--no-sandbox"]});
+const p=await b.newPage(); await p.setViewport({width:900,height:1300,deviceScaleFactor:1.4});
+await p.goto("file://"+(process.argv[3]||"/tmp/h")+".html",{waitUntil:"networkidle0"}); await new Promise(r=>setTimeout(r,900));
+const ps=await p.$$(".hp-page,.hp-bgpage,.docloom-doc");
+for(let i=0;i<Math.min(ps.length,Number(process.argv[4]||2));i++) await ps[i]!.screenshot({path:`${process.argv[3]||"/tmp/h"}-${i+1}.png`});
+await b.close(); console.log(`pages=${ps.length} fallback=${!html.includes('class="hp-page"')}`);
