@@ -1289,9 +1289,11 @@ function renderOverlayImages(doc: RhwpDoc, pg: number): { html: string; pos: Set
     && /behindText|inFrontOfText|behind|front/i.test(c.wrap ?? "") && typeof c.x === "number" && typeof c.y === "number");
   let html = "";
   for (const c of ovls) {
-    pos.add(`${Math.round(c.x)},${Math.round(c.y)}`);
     const data = safe(() => doc.getControlImageData!(c.secIdx, c.paraIdx, c.controlIdx));
+    // ⚠ 바이트를 못 얻으면(예: 바이너리 .hwp 컨트롤) 오버레이를 그릴 수 없으므로 pos 에 넣지 않는다.
+    //   넣으면 흐름 렌더가 같은 그림을 스킵하는데 오버레이도 안 그려져 그림이 통째로 증발한다.
     if (!data || !data.length || data.length > MAX_IMG_BYTES) continue;
+    pos.add(`${Math.round(c.x)},${Math.round(c.y)}`); // 실제로 오버레이를 그린 위치만 흐름에서 스킵
     const mime = (doc.getControlImageMime && safe(() => doc.getControlImageMime!(c.secIdx, c.paraIdx, c.controlIdx))) || "image/png";
     const z = /front/i.test(c.wrap) ? 3 : 1; // inFrontOfText 위, behindText 아래(본문 z=2 사이)
     html += `<img class="hp-ovl" style="left:${Math.round(c.x)}px;top:${Math.round(c.y)}px;width:${Math.round(c.w)}px;height:${Math.round(c.h)}px;z-index:${z}" src="data:${mime};base64,${bytesToBase64(data)}">`;
